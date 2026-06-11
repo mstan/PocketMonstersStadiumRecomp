@@ -1,0 +1,331 @@
+/*
+ * debug_server.cpp - minimal JSON-line TCP debug server for PMS automation.
+ *
+ * Commands:
+ *   ping
+ *   status
+ *   set_button {"name":"A","down":true}
+ *   set_stick {"x":0,"y":0}
+ *   clear_input
+ *   fast_forward {"on":true}
+ *   set_volume {"value":1.0}
+ *   quit
+ */
+
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <winsock2.h>
+#include <windows.h>
+#pragma comment(lib, "ws2_32.lib")
+
+#include <algorithm>
+#include <atomic>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <thread>
+
+#include "debug_server.h"
+
+namespace pms::dbg {
+
+std::atomic<bool>     g_fast_forward{false};
+std::atomic<uint64_t> g_vi_ticks{0};
+std::atomic<uint64_t> g_frame_count{0};
+
+std::atomic<bool>     g_input_override_active{false};
+std::atomic<uint16_t> g_buttons_override{0};
+std::atomic<int>      g_stick_x_override{0};
+std::atomic<int>      g_stick_y_override{0};
+
+std::atomic<float>    g_audio_volume{0.0f};
+
+namespace {
+
+std::atomic<bool> s_running{false};
+std::thread s_thread;
+SOCKET s_listen_socket = INVALID_SOCKET;
+
+static std::string trim(std::string s) {
+    auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
+    s.erase(s.begin(), std::find_if_not(s.begin(), s.end(), is_space));
+    s.erase(std::find_if_not(s.rbegin(), s.rend(), is_space).base(), s.end());
+    return s;
+}
+
+static std::string get_str(const std::string& body, const char* key) {
+    std::string needle = std::string("\"") + key + "\"";
+    size_t p = body.find(needle);
+    if (p == std::string::npos) {
+        return {};
+    }
+    p = body.find(':', p + needle.size());
+    if (p == std::string::npos) {
+        return {};
+    }
+    p = body.find('"', p + 1);
+    if (p == std::string::npos) {
+        return {};
+    }
+    size_t q = body.find('"', p + 1);
+    if (q == std::string::npos) {
+        return {};
+    }
+    return body.substr(p + 1, q - p - 1);
+}
+
+static int get_int(const std::string& body, const char* key, int dflt) {
+    std::string needle = std::string("\"") + key + "\"";
+    size_t p = body.find(needle);
+    if (p == std::string::npos) {
+        return dflt;
+    }
+    p = body.find(':', p + needle.size());
+    if (p == std::string::npos) {
+        return dflt;
+    }
+    return std::strtol(body.c_str() + p + 1, nullptr, 10);
+}
+
+static float get_float(const std::string& body, const char* key, float dflt) {
+    std::string needle = std::string("\"") + key + "\"";
+    size_t p = body.find(needle);
+    if (p == std::string::npos) {
+        return dflt;
+    }
+    p = body.find(':', p + needle.size());
+    if (p == std::string::npos) {
+        return dflt;
+    }
+    return std::strtof(body.c_str() + p + 1, nullptr);
+}
+
+static bool get_bool(const std::string& body, const char* key, bool dflt) {
+    std::string needle = std::string("\"") + key + "\"";
+    size_t p = body.find(needle);
+    if (p == std::string::npos) {
+        return dflt;
+    }
+    p = body.find(':', p + needle.size());
+    if (p == std::string::npos) {
+        return dflt;
+    }
+    const char* v = body.c_str() + p + 1;
+    while (*v && std::isspace((unsigned char)*v)) {
+        v++;
+    }
+    if (_strnicmp(v, "true", 4) == 0 || *v == '1') {
+        return true;
+    }
+    if (_strnicmp(v, "false", 5) == 0 || *v == '0') {
+        return false;
+    }
+    return dflt;
+}
+
+static std::string get_cmd(const std::string& line) {
+    if (!line.empty() && line[0] == '{') {
+        return get_str(line, "cmd");
+    }
+    size_t p = line.find_first_of(" \t\r\n");
+    return line.substr(0, p);
+}
+
+static uint16_t button_bit(std::string name) {
+    std::transform(name.begin(), name.end(), name.begin(),
+        [](unsigned char c) { return (char)std::tolower(c); });
+    if (name == "a") return 0x8000;
+    if (name == "b") return 0x4000;
+    if (name == "z") return 0x2000;
+    if (name == "start") return 0x1000;
+    if (name == "du" || name == "d_up" || name == "d-up" || name == "up") return 0x0800;
+    if (name == "dd" || name == "d_down" || name == "d-down" || name == "down") return 0x0400;
+    if (name == "dl" || name == "d_left" || name == "d-left" || name == "left") return 0x0200;
+    if (name == "dr" || name == "d_right" || name == "d-right" || name == "right") return 0x0100;
+    if (name == "l") return 0x0020;
+    if (name == "r") return 0x0010;
+    if (name == "cu" || name == "c_up" || name == "c-up") return 0x0008;
+    if (name == "cd" || name == "c_down" || name == "c-down") return 0x0004;
+    if (name == "cl" || name == "c_left" || name == "c-left") return 0x0002;
+    if (name == "cr" || name == "c_right" || name == "c-right") return 0x0001;
+    return 0;
+}
+
+static std::string handle_line(const std::string& raw_line) {
+    const std::string line = trim(raw_line);
+    const std::string cmd = get_cmd(line);
+    if (cmd.empty()) {
+        return R"({"ok":false,"error":"empty command"})";
+    }
+    if (cmd == "ping") {
+        return R"({"ok":true,"pong":true})";
+    }
+    if (cmd == "status") {
+        char buf[512];
+        std::snprintf(buf, sizeof(buf),
+            "{\"ok\":true,\"vi\":%llu,\"frame\":%llu,"
+            "\"fast_forward\":%s,\"input_override\":%s,"
+            "\"buttons\":%u,\"sx\":%d,\"sy\":%d,\"volume\":%.3f}",
+            (unsigned long long)g_vi_ticks.load(),
+            (unsigned long long)g_frame_count.load(),
+            g_fast_forward.load() ? "true" : "false",
+            g_input_override_active.load() ? "true" : "false",
+            (unsigned)g_buttons_override.load(),
+            g_stick_x_override.load(),
+            g_stick_y_override.load(),
+            (double)g_audio_volume.load());
+        return buf;
+    }
+    if (cmd == "set_button") {
+        const std::string name = get_str(line, "name");
+        const bool down = get_bool(line, "down", true);
+        const uint16_t bit = button_bit(name);
+        if (bit == 0) {
+            return R"({"ok":false,"error":"unknown button"})";
+        }
+        g_input_override_active.store(true);
+        uint16_t cur = g_buttons_override.load();
+        if (down) {
+            cur |= bit;
+        } else {
+            cur &= uint16_t(~bit);
+        }
+        g_buttons_override.store(cur);
+        return R"({"ok":true})";
+    }
+    if (cmd == "set_stick") {
+        g_input_override_active.store(true);
+        int x = std::clamp(get_int(line, "x", 0), -80, 80);
+        int y = std::clamp(get_int(line, "y", 0), -80, 80);
+        g_stick_x_override.store(x);
+        g_stick_y_override.store(y);
+        return R"({"ok":true})";
+    }
+    if (cmd == "clear_input") {
+        g_input_override_active.store(false);
+        g_buttons_override.store(0);
+        g_stick_x_override.store(0);
+        g_stick_y_override.store(0);
+        return R"({"ok":true})";
+    }
+    if (cmd == "fast_forward") {
+        g_fast_forward.store(get_bool(line, "on", true));
+        return R"({"ok":true})";
+    }
+    if (cmd == "set_volume") {
+        float v = std::clamp(get_float(line, "value", 1.0f), 0.0f, 1.0f);
+        g_audio_volume.store(v);
+        return R"({"ok":true})";
+    }
+    if (cmd == "quit") {
+        std::fflush(stdout);
+        std::fflush(stderr);
+        std::_Exit(0);
+    }
+    return R"({"ok":false,"error":"unknown command"})";
+}
+
+static void client_loop(SOCKET client) {
+    std::string line;
+    char ch = 0;
+    while (s_running.load()) {
+        int got = recv(client, &ch, 1, 0);
+        if (got <= 0) {
+            break;
+        }
+        if (ch == '\n') {
+            std::string response = handle_line(line);
+            response += "\n";
+            send(client, response.c_str(), (int)response.size(), 0);
+            line.clear();
+        } else if (ch != '\r') {
+            line.push_back(ch);
+            if (line.size() > 4096) {
+                line.clear();
+            }
+        }
+    }
+    closesocket(client);
+}
+
+static void server_thread(int port) {
+    WSADATA wsa{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        std::fprintf(stderr, "[pms-debug] WSAStartup failed\n");
+        return;
+    }
+
+    SOCKET listen_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listen_socket == INVALID_SOCKET) {
+        std::fprintf(stderr, "[pms-debug] socket failed: %d\n", WSAGetLastError());
+        WSACleanup();
+        return;
+    }
+    s_listen_socket = listen_socket;
+
+    BOOL reuse = TRUE;
+    setsockopt(listen_socket, SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons((u_short)port);
+    if (bind(listen_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+        std::fprintf(stderr, "[pms-debug] bind 127.0.0.1:%d failed: %d\n",
+                     port, WSAGetLastError());
+        closesocket(listen_socket);
+        s_listen_socket = INVALID_SOCKET;
+        WSACleanup();
+        return;
+    }
+    if (listen(listen_socket, 1) == SOCKET_ERROR) {
+        std::fprintf(stderr, "[pms-debug] listen failed: %d\n", WSAGetLastError());
+        closesocket(listen_socket);
+        s_listen_socket = INVALID_SOCKET;
+        WSACleanup();
+        return;
+    }
+
+    std::fprintf(stderr, "[pms-debug] listening on 127.0.0.1:%d\n", port);
+    while (s_running.load()) {
+        SOCKET client = accept(listen_socket, nullptr, nullptr);
+        if (client == INVALID_SOCKET) {
+            if (s_running.load()) {
+                std::fprintf(stderr, "[pms-debug] accept failed: %d\n", WSAGetLastError());
+            }
+            break;
+        }
+        client_loop(client);
+    }
+
+    closesocket(listen_socket);
+    s_listen_socket = INVALID_SOCKET;
+    WSACleanup();
+}
+
+} // namespace
+
+void start(int port) {
+    if (s_running.exchange(true)) {
+        return;
+    }
+    s_thread = std::thread(server_thread, port);
+}
+
+void shutdown() {
+    if (!s_running.exchange(false)) {
+        return;
+    }
+    SOCKET sock = s_listen_socket;
+    if (sock != INVALID_SOCKET) {
+        closesocket(sock);
+    }
+    if (s_thread.joinable()) {
+        s_thread.join();
+    }
+}
+
+} // namespace pms::dbg

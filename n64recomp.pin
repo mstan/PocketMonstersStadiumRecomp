@@ -1,0 +1,32 @@
+# Pin file for the companion engine forks.
+#
+# PocketMonstersStadiumRecomp builds against three sister repositories,
+# junctioned under lib/ by setup.bat / setup.sh. lib/ is never committed
+# here (it is .gitignored) — these pins record the exact commit of each
+# fork that this tree is known to build and boot against, so a checkout
+# is reproducible.
+#
+# All three forks track the `work/pocket-monsters-stadium` branch.
+# To roll forward: bump the sha, rebuild, and re-verify the boot.
+
+# ── lib/N64ModernRuntime — mstan/N64ModernRuntime ──────────────────
+# The runtime that stands in for the N64 OS. Carries the cooperative-
+# scheduler preemption fix (RECOMP_LOOP_CHECKPOINT drain/yield) and the
+# always-on ultra-trace ring used for PMS boot diagnosis. Embeds
+# N64Recomp as a git submodule at N64ModernRuntime/N64Recomp.
+n64modernruntime_branch = work/pocket-monsters-stadium
+n64modernruntime_sha    = 69d6b99bd4543f88892ddf1a5b4c9043c227ca75
+
+# ── (submodule) N64Recomp — mstan/N64Recomp ────────────────────────
+# The static recompiler. Unconditional loop-back-edge checkpoints +
+# delay-slot hard-error + the symbols-file build pipeline PMS uses.
+# Provisioned transitively as N64ModernRuntime's submodule.
+n64recomp_branch = work/pocket-monsters-stadium
+n64recomp_sha    = b9f1196d1a44560bb7d3b74974a7834e153c1f54
+
+# ── lib/rt64 — mstan/rt64 ──────────────────────────────────────────
+# The graphics renderer. Shared with PokemonStadiumRecomp; PMS builds
+# against the same SS Anne rt64 tip (uniform per-screen FB scaling for
+# supersampling, manual TMEM samplers).
+rt64_branch = work/pocket-monsters-stadium
+rt64_sha     = f8dfe294cd4cfe84999ac3df68034c6d604d63da

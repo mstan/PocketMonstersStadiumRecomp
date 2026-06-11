@@ -1,0 +1,495 @@
+# game.toml — Pocket Monsters Stadium (J)
+#
+# N64Recomp configuration, ROM-DIRECT (symbols-file) mode — no pret ELF.
+# Unlike PokemonStadiumRecomp (which consumes pret's post-build ELF),
+# this project has no decompilation. We feed N64Recomp the raw ROM plus
+# a symbols file (sections + per-function vram/size) generated from
+# Ghidra's auto-analysis (tools/gen_symbols_toml.py).
+#
+# NO STUBS. If recompilation hits a code path it can't handle, fix the
+# engine — never paper over.
+
+[input]
+# Resident .text loads at vram 0x80000400 (ROM offset 0x1000). The cart
+# header entrypoint field (0x80100400) is decorative for this game (same
+# quirk as Pokemon Stadium 1); the real entry stub is at 0x80000400 and
+# bzero's BSS at 0x80080000 then jr's to Main at 0x80000550. The runtime
+# maps the resident section onto 0x80000400 from ROM 0x1000, so the
+# entrypoint must match that section's ram_addr.
+entrypoint = 0x80000400
+
+# Byteswapped (.v64) original converted to native big-endian .z64 by the
+# project setup. md5 of the .z64 = c46e087d966a35095df96799b0b4ffae.
+rom_file_path = "baserom.z64"
+
+# Sections + functions, generated from Ghidra auto-analysis. In symbols
+# mode N64Recomp reads function words straight from rom_file_path using
+# each section's rom/vram and each function's vram/size — no ELF.
+symbols_file_path = "symbols.toml"
+
+# Output directory for generated C — gitignored.
+output_func_path = "generated"
+
+# One C file per function group (fast incremental builds).
+single_file_output = false
+functions_per_output_file = 32
+
+# Keep trace hooks off for the first bring-up — less codegen noise while
+# we validate the symbol set. Flip on once boot is being debugged.
+trace_mode = true
+
+[[input.decompressed_section_pattern]]
+base_name = "raw_fragment"
+vram = 0x00000000
+wrapper_format = "raw_fragment"
+
+[[input.decompressed_section_pattern]]
+base_name = "pers_szp_fragment"
+vram = 0x00000000
+wrapper_format = "pers_szp_yay0"
+
+[[input.decompressed_section_pattern]]
+base_name = "bare_yay0_fragment"
+vram = 0x00000000
+wrapper_format = "bare_yay0"
+
+# Fragment E4 has loader-resolved import placeholders after Yay0
+# decompression and before Memmap_RelocateFragment registers it.
+# These words came from the runtime fragment dump at id 0xE4.
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x38A580
+offset = 0x2C
+value = 0x0C0134C0
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x38A580
+offset = 0x6C
+value = 0x0C0134C0
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x38A580
+offset = 0xA8
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x38A580
+offset = 0xB0
+value = 0x8DCE049C
+
+# Battle fragments E5/E6/DB have loader-resolved import placeholders
+# after Yay0 decompression, matching the E4 class above.
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x2C
+value = 0x0C0134C0
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x6C
+value = 0x0C0134C0
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x90
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x94
+value = 0x8DCE0490
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0xD0
+value = 0x0C0147F4
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x120
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x124
+value = 0x8DCE0490
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x130
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x190
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x194
+value = 0x8DCE0490
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x1CC
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x1D0
+value = 0x8DCE0490
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x25C
+value = 0x0C0147F4
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x2B0
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x2B4
+value = 0x8DCE0490
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x2FC
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x370
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x374
+value = 0x8DCE0490
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x3D8
+value = 0x0C016104
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x4484
+value = 0x8F200244
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x463C
+value = 0x8F200244
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x47D4
+value = 0x8F2003AC
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35C460
+offset = 0x4810
+value = 0x8F2003AC
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x2C
+value = 0x0C0134C0
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x6C
+value = 0x0C0134C0
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0xAC
+value = 0x0C0147F4
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0xFC
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x100
+value = 0x8DCE0490
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x10C
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x16C
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x170
+value = 0x8DCE0490
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x1A8
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x1AC
+value = 0x8DCE0490
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x22C
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x230
+value = 0x8DCE0490
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x294
+value = 0x0C016104
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x2CC
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x2D0
+value = 0x8DCE0490
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x324
+value = 0x0C0147F4
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x378
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x37C
+value = 0x8DCE0490
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x3C4
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x444
+value = 0x0C0147F4
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x49C
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x4A0
+value = 0x8DCE0490
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x534
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x58C
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x60C
+value = 0x0C0147F4
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x664
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x668
+value = 0x8DCE0490
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x6FC
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x754
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x18D8C
+value = 0x8F200244
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x18F7C
+value = 0x8F200244
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x35E8A8
+offset = 0x19758
+value = 0x8F200504
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x369FB0
+offset = 0x28
+value = 0x3C0E8006
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x369FB0
+offset = 0x2C
+value = 0x8DCE049C
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x369FB0
+offset = 0x1A0
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x369FB0
+offset = 0x204
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x369FB0
+offset = 0x268
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x369FB0
+offset = 0x2CC
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x369FB0
+offset = 0x330
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x369FB0
+offset = 0x3B4
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x369FB0
+offset = 0x2F454
+value = 0x8F200504
+
+# Additional battle fragments have the same loader-resolved allocator
+# placeholder class: zeroed jal words become calls to FUN_8000515c.
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x326728
+offset = 0x12C
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x326728
+offset = 0x228
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x355420
+offset = 0x120
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x355420
+offset = 0x258
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x355420
+offset = 0x3C0
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x355420
+offset = 0x518
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x3C5220
+offset = 0x38
+value = 0x0C001457
+
+[[input.decompressed_section_patch]]
+rom_wrapper = 0x3CE0B0
+offset = 0x38
+value = 0x0C001457
+
+[output]
+collision_policy = "suffix"
+
+# ── Patches ────────────────────────────────────────────────────────────────
+[patches]
+# libleo 64DD bootdisk descramble — IDENTIFIED, confidence HIGH.
+#
+# FUN_800095cc is libleo's __LeoBootGame2 (the scrambled 64DD bootstrap),
+# NOT game copy protection. FUN_80009490 immediately preceding it is
+# LeoBootGame: it derives key = (sum of the 4 bytes of __LeoBootGame2's
+# address) & 0xFF, descrambles the blob in place (ptr[2]-=key; ptr[3]+=key
+# over 0x324 bytes, then __LeoBootGame3 for 0x60), then jal's the now-
+# decrypted __LeoBootGame2. The ROM bytes are SCRAMBLED — not valid MIPS
+# until that routine runs — which static recompilation cannot execute (we
+# run compiled C, not RDRAM bytes). Stubbing __LeoBootGame2 lets generation
+# complete; this is a genuine self-modifying-code boundary, not a
+# recompiler bug being papered over.
+#
+# Evidence (vs PokemonStadiumRecomp/disasm/src/libleo/bootdisk.c, which has
+# the real descrambled source — PSR keeps the same bytes scrambled in-ROM):
+#   - FUN_80009490 size = 0x13C, exactly matching `bzero(LeoBootGame, 0x13C)`.
+#   - FUN_800095cc sits at 0x80009490 + 0x13C — i.e. the function LeoBootGame
+#     descrambles (bootdisk.c: `ptr = (u8*)&__LeoBootGame2`).
+#   - byte-identical descramble algorithm (address-sum key; -key/+key pairs).
+#   - PSR Makefile note: "this file is encrypted we cant have splat decrypt it".
+# PMS was a 64DD-era title (alleged Disk Drive addon), so this live bootdisk
+# path is genuine residue, not libultra boilerplate.
+#
+# NOT on the cart-boot path: LeoBootGame is reached only via the dead
+# STATE_N64DD_BOOT_UNUSED case of the Game_Thread state machine (nothing
+# sets that state on first boot). So this stub is SAFE and is NOT the
+# black-screen cause: the REAL copy protection (Game_DoCopyProtection,
+# PSR 0x80028FA0) passes — PMS ROM @0xE38 is byte-identical to PSR's
+# magic 0x828A — and even on failure its switch `default` still renders the
+# N64 logo, never a black screen. Full analysis: FINDINGS.md (CP-001).
+stubs = [
+    "FUN_800095cc",
+]
+
+[[patches.hook]]
+func = "FUN_80001c50"
+before_vram = 0x80001C50
+text = "recomp_register_runtime_fragment(rdram, ctx->r4, (int32_t)ctx->r5);"
+
+[[patches.hook]]
+func = "FUN_80001f8c"
+before_vram = 0x80001F8C
+text = "recomp_unregister_runtime_fragment((uint32_t)ctx->r4);"
+
+[[patches.hook]]
+func = "FUN_80016c70"
+before_vram = 0x80016D00
+text = "pms_diag_script_dispatch(rdram, ctx);"

@@ -1,0 +1,79 @@
+# Build output
+build/
+build-*/
+*.o
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.user
+
+# Generated recompiler output (regen via N64Recomp from game.toml +
+# symbols.toml + functions.json — the recompiler is the source of truth)
+generated/
+
+# Vendored engine forks live under lib/ as junctions to the sister
+# checkouts (N64ModernRuntime, rt64), recreated by setup.bat/sh. Each is
+# its own repository — never committed here. See n64recomp.pin.
+lib/
+
+# Ghidra project state (live DBs are machine-specific and large; reseed
+# via tools/ghidra_seed.py + tools/GhidraSeed.java)
+ghidra/**/*.rep/
+ghidra/**/*.lock
+ghidra/**/*.lock~
+ghidra/**/*.gpr.bak
+ghidra/**/projects/
+ghidra/**/~*.db/
+ghidra/**/~index.bak
+ghidra/**/~index.dat
+ghidra/**/~journal.bak
+ghidra/**/tmp*.ps
+
+# Regenerable build-time dumps (reproduced from baserom.z64 + tools/)
+resident.bin
+hash_miss_*.bin
+aspmain_combined.bin.bak
+
+# Ad-hoc debug/probe scaffolding (the `_`-prefixed scratch scripts and
+# captures from investigations). Permanent, named tools are tracked.
+tools/_*
+tools/__pycache__/
+__pycache__/
+
+# ROM data (don't redistribute)
+*.z64
+*.n64
+*.v64
+*.gb
+*.gbc
+
+# Save / dump
+*.sav
+*.srm
+*.state
+saves/
+launcher.cfg
+
+# Logs, captures, temp
+*.log
+_*.png
+_*.pid
+_*.out
+_tmp_*
+*.bak
+*.bak-*
+
+# Internal / agent notes kept locally only
+.claude/
+
+# Editor / OS
+.vs/
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

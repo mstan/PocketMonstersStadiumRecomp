@@ -1,0 +1,7 @@
+# function_drops.txt — VRAM addresses Ghidra mislabeled as functions but
+# are really data. Excluded from symbols.toml by tools/gen_symbols_toml.py.
+# One hex address per line; trailing # comments allowed. Keep a note on why.
+#
+# (none currently — 0x800095cc turned out to be runtime-descrambled
+#  copy-protection code reached by a real jal, so it is kept as a declared
+#  function and STUBBED in game.toml [patches].stubs instead of dropped.)
