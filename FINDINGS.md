@@ -174,3 +174,59 @@ lazily by FUN_800177dc) never receives anything. Per-thread attribution is the
 blocker: **the rings need a thread-id field** (next instrumentation step).
 After that: overlay/fragment sectioning (num_sections=1 today) is the known
 next phase before graphics can flow.
+
+## CRASH-001 — Deep-screen crashes = undiscovered indirect-call function entries inside fragments. Confidence: **HIGH**
+
+**What.** The user's two reported crashes — **Options** (from title/main menu)
+and **Free Battle → pick party → enter match** — and the general "deep-play"
+abort class all share one root cause: a function *entry* the game calls
+indirectly was never discovered, so librecomp's `get_function` misses it and the
+runner falls into the post-call lookup-miss trampoline / aborts.
+
+**Evidence (last_error.log).**
+- `get_function lookup miss: 0x82117ED4` (a fragment link-time addr) and
+  `0x80115490` (a fragment *runtime* load addr) — "no loaded code section
+  contains this as runtime or link-time address". Reached as a *post-call*
+  trampoline (`ra=0x82117ED4`), i.e. the game did an indirect `jalr` to it.
+- A separate run shows a ~3800-deep call-trail out of `func_82004E9C` /
+  `func_820058BC` (funcs_114.c) — host runaway once control flow derails.
+
+**Why (the discovery gap, pinned exactly).** In `generated/recomp_overlays.inl`
+the fragment owning this range has:
+```
+{ .func = func_82117908, .offset = 0x00017908, .rom_size = 0x000004C8 },
+{ .func = func_82117DD0, .offset = 0x00017DD0, .rom_size = 0x00000968 },  // 0x17DD0..0x18738
+```
+The missed target `0x82117ED4` (offset `0x17ED4`) lies **strictly inside
+`func_82117DD0`'s body** — it is a *separate* function entry that discovery
+absorbed into the preceding function. `func_82117ED4` exists in **no** generated
+file. Both PMS discovery tools only find prologues in **uncovered gaps**
+(`tools/mips_find_functions.py` gap-seed skips any addr already `reached`;
+`tools/scan_missing_funcs.py` skips `is_covered`), and both **explicitly cannot
+resolve `jalr` indirect calls or `jr` jump-table targets** (documented in
+mips_find_functions.py). So an indirect-only entry that falls inside an
+over-extended neighbor is invisible to both.
+
+This is the same fix class US Stadium already solved ("seed static entries from
+relocation targets, indirect-dispatch fallthroughs, branch fallthroughs, link
+targets, bounded raw fallthrough windows" — see
+`../PokemonStadiumRecomp/ISSUES.md` GB-Tower entry, 2026-06-01).
+
+**Fix direction (two options; ship the general one).**
+1. *Static, general (preferred).* Scan each fragment for the non-leaf prologue
+   pattern **everywhere** (not just uncovered gaps); when a prologue is found
+   strictly inside an existing function body, **split** the enclosing function
+   at that entry. Optionally also seed from in-section code pointers found in
+   the fragment's data/relocation table (the true source of these `jalr`
+   targets). Then regen + rebuild.
+2. *Execution-driven (narrower).* Harvest the runtime `get_function` miss
+   addresses across a deep-screen sweep, verify each decodes as a prologue, add
+   as explicit function entries (splitting the absorber), regen + rebuild.
+   Whack-a-mole; misses any screen not visited.
+
+**Discipline.** This is the load-bearing "overlay-miss fix" the handoff/CLAUDE
+rules flag — **branch the forks first**, do not regress the booting build,
+verify against both exact repros (Options; Free Battle → party → match).
+Key addrs: miss `0x82117ED4` (inside `func_82117DD0` @ off 0x17ED4), `0x80115490`
+(runtime); derail funcs `func_82004E9C`/`func_820058BC` (funcs_114.c). Tracked
+as ISSUES #1.

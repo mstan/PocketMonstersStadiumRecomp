@@ -57,26 +57,27 @@ Issue numbers are stable IDs, not strictly the work order.
   class), structurally similar to US issues #7/#11 (constant-SP tailcall
   depth) but presenting on PMS's overlay path.
 
-*Root cause (HIGH confidence on the mechanism).* PMS overlay/fragment
-sectioning is incomplete. `src/main/register_overlays.cpp` registers
-**only the resident kernel** (one static section @ `0x80000400`,
-`num_sections = 1`). A runtime fragment registrar exists
-(`[reg-frag]`/`[synth-frag]` synthesized sections, with eviction), and
-it covers many fragments, but some overlay call targets
-(`0x82117ED4`, `0x80115490`, …) are never registered → `get_function`
-misses → trampoline/abort. The US build sidesteps this entirely because
-its 77 fragments have unique VRAM addresses and are statically
-recompiled into one ELF (US CLAUDE.md decision #6); PMS has not yet
-reproduced that static sectioning.
+*Root cause (HIGH confidence — see FINDINGS CRASH-001).* Not missing
+sectioning — the fragment **is** recompiled and registered. The miss is
+an **undiscovered function entry**: `0x82117ED4` (offset `0x17ED4`) lies
+strictly *inside* `func_82117DD0`'s body (`rom_size 0x968`,
+`0x17DD0..0x18738`) in `generated/recomp_overlays.inl`. It's a separate
+function the game calls indirectly (`jalr`), but PMS's discovery tools
+only find prologues in **uncovered gaps** and **cannot resolve indirect
+calls / jump tables**, so an indirect-only entry absorbed into an
+over-extended neighbor is invisible. `func_82117ED4` exists in no
+generated file → `get_function` misses → trampoline/abort.
 
-*Fix layer.* Recompiler / `game.toml` sectioning (NOT an app-side
-patch). Two candidate paths, prefer the complete one:
-  1. **Static sectioning** (preferred, mirrors US): give every overlay/
-     fragment its own recompiled section so `get_function` always
-     resolves — no runtime synthesis needed for the missing ones.
-  2. Extend the runtime synth-frag registrar to cover the missed
-     targets (only if static sectioning proves infeasible for PMS's
-     fragment layout).
+*Fix layer.* Fragment function-entry discovery + regen (NOT a runtime
+patch). Prefer the general option:
+  1. **Static, general (preferred):** scan each fragment for the non-leaf
+     prologue pattern *everywhere*, and **split** any enclosing function
+     when a prologue is found in its interior; optionally seed from
+     in-fragment code pointers / relocations (the actual `jalr` source).
+     This is the US fix class ("seed from relocation/indirect targets").
+  2. **Execution-driven (narrower):** harvest runtime miss addresses
+     across a deep-screen sweep, add as explicit entries, regen.
+     Whack-a-mole; misses unvisited screens.
 
 *Discipline.* This is a load-bearing recompiler/sectioning change —
 **branch the forks first**; do not regress the booting build. Verify
