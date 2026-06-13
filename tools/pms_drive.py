@@ -138,6 +138,13 @@ def main(argv) -> int:
                     print(CAPTURES.read_text())
                 else:
                     print("(no runtime_captures.json yet)")
+            elif act == "dumpsec":
+                print("dump_sections " + json.dumps(c.command("dump_sections")))
+            elif act == "ptrsite":
+                print("probe_pointer_site " + json.dumps(c.command("probe_pointer_site")))
+            elif act.startswith("probe:"):
+                addr = act.split(":", 1)[1]
+                print("probe_lookup " + json.dumps(c.command("probe_lookup", addr=addr)))
             else:
                 print(f"unknown action: {act}", file=sys.stderr)
         c.command("clear_input")

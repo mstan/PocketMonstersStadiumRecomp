@@ -34,6 +34,12 @@ extern "C" void pkmnstadium_textdraw_dump(void);
 extern "C" void pkmnstadium_fontdump(void);
 extern "C" void pkmnstadium_stringdump(void);
 
+// Lookup-miss capture debug hooks (librecomp overlays.cpp). Used to
+// validate the always-on capture pipeline without a real crash.
+extern "C" void recomp_debug_dump_loaded_sections(void);
+extern "C" int  recomp_debug_probe_lookup(uint32_t addr);
+extern "C" int  recomp_debug_probe_pointer_site(uint32_t* out_addr);
+
 namespace pms::dbg {
 
 std::atomic<bool>     g_fast_forward{false};
@@ -242,6 +248,36 @@ static std::string handle_line(const std::string& raw_line) {
         // answer the Latin-glyph question. Free-run to a text screen first.
         pkmnstadium_fontdump();
         return R"({"ok":true,"wrote":"fontdump.log + font_slotN.i8"})";
+    }
+    if (cmd == "dump_sections") {
+        // Dump the live loaded-section table to build/loaded_sections.json
+        // so a probe can target real interior / reloc offsets.
+        recomp_debug_dump_loaded_sections();
+        return R"({"ok":true,"wrote":"build/loaded_sections.json"})";
+    }
+    if (cmd == "probe_lookup") {
+        // Force a get_function lookup for {"addr":"0x...."} to exercise the
+        // always-on lookup-miss capture (writes build/runtime_captures.json
+        // on a miss). Does NOT invoke the result, so a miss does not abort.
+        const std::string addr_s = get_str(line, "addr");
+        const uint32_t addr = (uint32_t)std::strtoul(addr_s.c_str(), nullptr, 0);
+        const int missed = recomp_debug_probe_lookup(addr);
+        char buf[128];
+        std::snprintf(buf, sizeof(buf),
+            "{\"ok\":true,\"addr\":\"0x%08X\",\"missed\":%s}",
+            addr, missed ? "true" : "false");
+        return buf;
+    }
+    if (cmd == "probe_pointer_site") {
+        // Probe a live reloc offset (not a func start) to exercise the
+        // "pointer-site" classification path; eviction-race-free.
+        uint32_t chosen = 0;
+        const int missed = recomp_debug_probe_pointer_site(&chosen);
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+            "{\"ok\":true,\"addr\":\"0x%08X\",\"missed\":%s}",
+            chosen, missed ? "true" : "false");
+        return buf;
     }
     if (cmd == "quit") {
         std::fflush(stdout);
