@@ -25,7 +25,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
+#include <mutex>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "app_paths.h"
 #include "recomp.h"   // recomp_context + extern "C" tolerant-emit declarations
@@ -567,6 +571,671 @@ extern "C" const char* pkmnstadium_trace_at(uint64_t idx) {
 
 extern "C" uint32_t pkmnstadium_trace_capacity(void) {
     return kTraceCap;
+}
+
+// ---- Text-draw discovery census --------------------------------------------
+//
+// PMS-J relaid the code vs. the US PokemonStadium oracle, so the string-draw
+// function (US func_8001F1E8: a glyph-byte-string printf that loops issuing
+// texture-rect draws) is at an unknown PMS-J address. We find it empirically,
+// not by static address-guessing.
+//
+// trace_mode=true makes the recompiler emit TRACE_ENTRY() at every function
+// entry; we extend that macro (include/trace.h) to also forward (ra,a0..a3)
+// here. This census is always-on from process start when armed (env
+// PMS_TEXTPROBE=1, read before the game runs — NOT armed mid-run), and keeps a
+// bounded per-PC tally of every function entry whose arguments match the
+// string-draw signature:
+//
+//   a0 (x) and a1 (y) are small (screen coords), and
+//   a2 (fmt) points at a NUL-terminated run of nonzero RDRAM bytes (glyphs).
+//
+// The real string-drawer is the FUN_ called far more often than any incidental
+// match, with a2 consistently pointing at glyph byte-strings. The dump (debug
+// server "textdump", or any controlled abort) ranks candidates by call count
+// and shows a sample of the source bytes — that sample is also the live
+// encoding inventory + natural content-hash keys for the translation layer.
+namespace {
+constexpr uint32_t kTextCandCap   = 256; // distinct PCs tracked
+constexpr uint32_t kTextSampleLen = 64;  // source bytes shown per PC (find aid)
+constexpr uint32_t kSrcMax        = 256; // max source string captured/hashed
+constexpr uint32_t kStringDrawPC  = 0x8001A944u; // PMS-J string-draw printf
+
+// FNV-1a 64 over raw source glyph bytes — the translation KV key.
+inline uint64_t pms_fnv1a(const uint8_t* p, uint32_t n) {
+    uint64_t h = 1469598103934665603ull;
+    for (uint32_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+    return h;
+}
+
+// ---- String inventory (full translation authoring) -------------------------
+// Every text fn aggregates into ONE PC (the string-draw printf), so the per-PC
+// census can't inventory distinct strings. This table is keyed by content-hash
+// and records every distinct source string drawn by kStringDrawPC across a full
+// screen sweep — the authoritative list to translate. Dump via "stringdump".
+constexpr uint32_t kStrInvCap = 4096;
+struct StrInvEntry {
+    uint64_t key;            // FNV-1a64 over bytes[0..len)
+    uint8_t  bytes[kSrcMax];
+    uint16_t len;
+    uint16_t a0, a1;         // last-seen coords
+    uint32_t count;
+    bool     used;
+};
+StrInvEntry g_strinv[kStrInvCap];
+std::mutex  g_strinv_mtx;
+std::atomic<uint32_t> g_strinv_dropped{0};
+
+// Write stringdump.log from g_strinv. Caller MUST hold g_strinv_mtx. Returns
+// the number of distinct strings written. Used both for the on-demand dump and
+// for continuous persistence (written on every newly-seen string) so a crash
+// mid-capture never loses the inventory.
+uint32_t dump_stringinv_locked() {
+    const std::string path = pms::app_file("stringdump.log").string();
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) return 0;
+    static uint32_t order[kStrInvCap]; // lock-held → single-threaded; off-stack
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < kStrInvCap; ++i) if (g_strinv[i].used) order[n++] = i;
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t best = i;
+        for (uint32_t j = i + 1; j < n; ++j)
+            if (g_strinv[order[j]].count > g_strinv[order[best]].count) best = j;
+        uint32_t t = order[i]; order[i] = order[best]; order[best] = t;
+    }
+    std::fprintf(f, "=== string inventory (distinct strings drawn by 0x%08X) ===\n", kStringDrawPC);
+    std::fprintf(f, "  distinct strings: %u   dropped(table full): %u\n", n,
+                 g_strinv_dropped.load(std::memory_order_relaxed));
+    std::fprintf(f, "  format: <key> <count> <x> <y> <len> <src_hex>\n\n");
+    for (uint32_t i = 0; i < n; ++i) {
+        const StrInvEntry& e = g_strinv[order[i]];
+        std::fprintf(f, "0x%016llX %6u %4u %4u %3u ",
+                     (unsigned long long)e.key, e.count, e.a0, e.a1, e.len);
+        for (uint16_t k = 0; k < e.len; ++k) std::fprintf(f, "%02x", e.bytes[k]);
+        std::fprintf(f, "\n");
+    }
+    std::fclose(f);
+    return n;
+}
+
+void strinv_upsert(const uint8_t* b, uint16_t len, uint16_t a0, uint16_t a1) {
+    if (len == 0) return;
+    const uint64_t key = pms_fnv1a(b, len);
+    std::lock_guard<std::mutex> lk(g_strinv_mtx);
+    StrInvEntry* slot = nullptr;
+    uint32_t freei = kStrInvCap;
+    for (uint32_t i = 0; i < kStrInvCap; ++i) {
+        if (g_strinv[i].used) {
+            if (g_strinv[i].key == key) { slot = &g_strinv[i]; break; }
+        } else if (freei == kStrInvCap) {
+            freei = i;
+        }
+    }
+    bool is_new = false;
+    if (slot == nullptr) {
+        if (freei == kStrInvCap) { g_strinv_dropped.fetch_add(1, std::memory_order_relaxed); return; }
+        slot = &g_strinv[freei];
+        slot->used = true; slot->key = key; slot->len = len;
+        std::memcpy(slot->bytes, b, len);
+        slot->count = 0;
+        is_new = true;
+    }
+    slot->a0 = a0; slot->a1 = a1;
+    slot->count++;
+    // Persist continuously: every newly-seen string is flushed to disk so a
+    // crash (e.g. the known deep-overlay tailcall abort) never loses captures.
+    if (is_new) dump_stringinv_locked();
+}
+
+struct TextDrawCand {
+    uint32_t pc;                  // guest VRAM, parsed from "FUN_80XXXXXX"
+    uint32_t ra;                  // representative caller (latest)
+    uint32_t a0, a1, a2;          // latest sample args
+    uint64_t count;               // qualifying call count
+    uint8_t  sample[kTextSampleLen];
+    uint8_t  sample_len;          // bytes captured (excludes NUL)
+    bool     used;
+};
+
+TextDrawCand g_textcand[kTextCandCap];
+std::mutex   g_textcand_mtx;
+std::atomic<uint64_t> g_text_qualifying{0}; // total qualifying calls seen
+
+bool textprobe_armed() {
+    static const bool armed = [] {
+        const char* e = std::getenv("PMS_TEXTPROBE");
+        return e && (e[0] == '1' || e[0] == 't' || e[0] == 'T' || e[0] == 'y' || e[0] == 'Y');
+    }();
+    return armed;
+}
+
+uint32_t parse_fun_pc(const char* name) {
+    // names are "FUN_80XXXXXX" (or "func_80XXXXXX"): hex address after '_'.
+    if (name == nullptr) return 0;
+    const char* us = std::strrchr(name, '_');
+    const char* p = us ? us + 1 : name;
+    return (uint32_t)std::strtoul(p, nullptr, 16);
+}
+} // namespace
+
+// Forwarded from include/trace.h's TRACE_ENTRY() on every recompiled-function
+// entry (only when trace_mode=true). Hot path: cheap reject first.
+extern "C" void pkmnstadium_textdraw_probe(const char* name,
+                                           uint32_t ra,
+                                           uint32_t a0, uint32_t a1,
+                                           uint32_t a2, uint32_t a3) {
+    (void)a3;
+    if (!textprobe_armed()) {
+        return;
+    }
+    // Cheap reject: x/y must look like screen coords, not pointers/large ints.
+    if (a0 >= 0x1000u || a1 >= 0x1000u) {
+        return;
+    }
+    // a2 must point at a NUL-terminated run of nonzero bytes in RDRAM.
+    if (!pms_diag_rdram_range(a2, 2)) {
+        return;
+    }
+    unsigned char* rdram = recomp_runtime_get_rdram();
+    if (rdram == nullptr) {
+        return;
+    }
+    const uint32_t pa = a2 & 0x1FFFFFFFu; // RDRAM is byte-swizzled: read [^3]
+    uint8_t buf[kSrcMax];
+    uint16_t len = 0;
+    bool terminated = false;
+    for (uint32_t i = 0; i < kSrcMax; ++i) {
+        if (!pms_diag_rdram_range(a2 + i, 1)) { break; }
+        unsigned char c = rdram[(pa + i) ^ 3];
+        if (c == 0) { terminated = (i > 0); break; }
+        buf[len++] = c;
+    }
+    if (!terminated || len < 2) {
+        return; // not a (multi-byte) string
+    }
+
+    g_text_qualifying.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t pc = parse_fun_pc(name);
+
+    // Authoritative distinct-string inventory for the string-draw printf.
+    if (pc == kStringDrawPC) {
+        strinv_upsert(buf, len, (uint16_t)a0, (uint16_t)a1);
+    }
+
+    std::lock_guard<std::mutex> lk(g_textcand_mtx);
+    TextDrawCand* slot = nullptr;
+    for (uint32_t i = 0; i < kTextCandCap; ++i) {
+        if (g_textcand[i].used && g_textcand[i].pc == pc) { slot = &g_textcand[i]; break; }
+    }
+    if (slot == nullptr) {
+        for (uint32_t i = 0; i < kTextCandCap; ++i) {
+            if (!g_textcand[i].used) { slot = &g_textcand[i]; slot->used = true; slot->pc = pc; break; }
+        }
+        if (slot == nullptr) { return; } // table full (>256 distinct PCs — unexpected)
+    }
+    slot->ra = ra;
+    slot->a0 = a0; slot->a1 = a1; slot->a2 = a2;
+    slot->count++;
+    uint8_t n = (len < kTextSampleLen) ? len : (uint8_t)kTextSampleLen;
+    std::memcpy(slot->sample, buf, n);
+    slot->sample_len = n;
+}
+
+extern "C" void pkmnstadium_textdraw_dump(void) {
+    const std::string path = pms::app_file("textdraw_probe.log").string();
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) {
+        std::fprintf(stderr, "[PMS] textdraw_dump: cannot open %s\n", path.c_str());
+        return;
+    }
+    std::time_t t = std::time(nullptr);
+    char ts[64] = {0};
+    std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+    std::fprintf(f, "=== text-draw census ===\n");
+    std::fprintf(f, "  time:            %s\n", ts);
+    std::fprintf(f, "  armed:           %s\n", textprobe_armed() ? "yes" : "NO (set PMS_TEXTPROBE=1)");
+    std::fprintf(f, "  total fn entries:%llu\n", (unsigned long long)pkmnstadium_trace_write_idx());
+    std::fprintf(f, "  qualifying calls:%llu\n",
+                 (unsigned long long)g_text_qualifying.load(std::memory_order_relaxed));
+
+    // Snapshot + sort by count desc (small table; simple selection sort).
+    TextDrawCand snap[kTextCandCap];
+    {
+        std::lock_guard<std::mutex> lk(g_textcand_mtx);
+        std::memcpy(snap, g_textcand, sizeof(snap));
+    }
+    uint32_t order[kTextCandCap];
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < kTextCandCap; ++i) { if (snap[i].used) order[n++] = i; }
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t best = i;
+        for (uint32_t j = i + 1; j < n; ++j) {
+            if (snap[order[j]].count > snap[order[best]].count) best = j;
+        }
+        uint32_t tmp = order[i]; order[i] = order[best]; order[best] = tmp;
+    }
+
+    std::fprintf(f, "  distinct PCs:    %u\n\n", n);
+    std::fprintf(f, "  (key = FNV-1a64 of source bytes; for translations.json use src_hex below.\n");
+    std::fprintf(f, "   keys are exact only for strings <= %u bytes — longer ones are truncated.)\n\n",
+                 kTextSampleLen);
+    std::fprintf(f, "  rank  pc          count     a0   a1   a2(fmt)    key                 sample (hex / ascii)\n");
+    for (uint32_t i = 0; i < n; ++i) {
+        const TextDrawCand& c = snap[order[i]];
+        const uint64_t key = pms_fnv1a(c.sample, c.sample_len);
+        std::fprintf(f, "  %3u   0x%08X  %-8llu  %4u %4u 0x%08X  0x%016llX  ",
+                     i, c.pc, (unsigned long long)c.count, c.a0, c.a1, c.a2,
+                     (unsigned long long)key);
+        for (uint32_t k = 0; k < c.sample_len; ++k) std::fprintf(f, "%02X", c.sample[k]);
+        std::fprintf(f, "  |");
+        for (uint32_t k = 0; k < c.sample_len; ++k) {
+            unsigned char ch = c.sample[k];
+            std::fprintf(f, "%c", (ch >= 0x20 && ch < 0x7F) ? ch : '.');
+        }
+        std::fprintf(f, "|\n");
+    }
+    std::fclose(f);
+    std::fprintf(stderr, "[PMS] textdraw census written: %s (%u PCs, %llu qualifying calls)\n",
+                 path.c_str(), n,
+                 (unsigned long long)g_text_qualifying.load(std::memory_order_relaxed));
+    std::fflush(stderr);
+}
+
+// Dump the distinct-string inventory (every string drawn by the string-draw
+// printf this session). Authoritative source for authoring translations.json:
+// each line gives the FNV key + full src_hex; decode EUC-JP with
+// tools/pms_build_translations.py. Run a full screen sweep first.
+extern "C" void pkmnstadium_stringdump(void) {
+    uint32_t n;
+    { std::lock_guard<std::mutex> lk(g_strinv_mtx); n = dump_stringinv_locked(); }
+    std::fprintf(stderr, "[PMS] string inventory written: stringdump.log (%u distinct)\n", n);
+    std::fflush(stderr);
+}
+
+// ---- Runtime English-translation layer -------------------------------------
+//
+// Hooks the string-draw printf (PMS-J 0x8001A944) at its TRACE_ENTRY (the
+// recompiler emits one at every fn entry; trace.h forwards rdram+ctx here).
+// Strategy: content-hash the source glyph bytes (the fmt at a2=ctx->r6), look
+// up an English replacement, and on a hit write the English (ASCII, NUL-term)
+// into transient scratch on the calling thread's guest stack and repoint
+// ctx->r6 at it. The ORIGINAL function then runs unchanged: _Printf formats it
+// (dynamic %d/%s args stay intact — the English template keeps the specifiers)
+// and renders it glyph-by-glyph through the existing Latin glyphs. So:
+//   - no engine change / no regen (vs. the recompiler "reimplemented" path),
+//   - replacement length is unbounded (we never write back into game RAM),
+//   - dynamic format strings work for free.
+// KV store = translations.json next to the exe; hot-reloaded on mtime change.
+// Keyed by FNV-1a64 of the raw source bytes (robust to RDRAM buffer reuse).
+namespace {
+std::unordered_map<uint64_t, std::string> g_xlate;     // hash(src) -> english
+std::mutex g_xlate_mtx;
+std::atomic<bool> g_xlate_armed{false};                // lock-free fast reject
+std::filesystem::file_time_type g_xlate_mtime{};
+bool g_xlate_ever_loaded = false;
+std::atomic<uint64_t> g_xlate_calls{0};
+std::atomic<uint64_t> g_xlate_hits{0};
+
+int hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// Read a JSON string value starting at the opening quote; returns bytes with
+// basic escapes (\" \\ \n \t \/). Advances `i` past the closing quote.
+std::string json_read_string(const std::string& s, size_t& i) {
+    std::string out;
+    if (i >= s.size() || s[i] != '"') return out;
+    ++i;
+    while (i < s.size() && s[i] != '"') {
+        char c = s[i++];
+        if (c == '\\' && i < s.size()) {
+            char e = s[i++];
+            switch (e) {
+            case 'n': out.push_back('\n'); break;
+            case 't': out.push_back('\t'); break;
+            case '"': out.push_back('"');  break;
+            case '\\':out.push_back('\\'); break;
+            case '/': out.push_back('/');  break;
+            default:  out.push_back(e);    break;
+            }
+        } else {
+            out.push_back(c);
+        }
+    }
+    if (i < s.size()) ++i; // closing quote
+    return out;
+}
+
+// Minimal tolerant scan: for each "src_hex":"..." find the next "target":"..."
+// and map FNV(src bytes) -> target. Schema (hot-reloadable):
+//   [ { "src_hex":"a5d7a5aa", "target":"Hello", "note":"..." }, ... ]
+void load_translations_locked() {
+    g_xlate.clear();
+    const std::string path = pms::app_file("translations.json").string();
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return;
+    std::string data;
+    { char buf[4096]; size_t r; while ((r = std::fread(buf, 1, sizeof(buf), f)) > 0) data.append(buf, r); }
+    std::fclose(f);
+
+    size_t i = 0;
+    const std::string SRC = "\"src_hex\"";
+    while ((i = data.find(SRC, i)) != std::string::npos) {
+        i += SRC.size();
+        size_t q = data.find('"', i);
+        if (q == std::string::npos) break;
+        std::string hex = json_read_string(data, q);
+        // bytes from hex
+        std::vector<uint8_t> bytes;
+        for (size_t k = 0; k + 1 < hex.size(); k += 2) {
+            int hi = hexval(hex[k]), lo = hexval(hex[k + 1]);
+            if (hi < 0 || lo < 0) { bytes.clear(); break; }
+            bytes.push_back((uint8_t)((hi << 4) | lo));
+        }
+        size_t t = data.find("\"target\"", q);
+        if (t == std::string::npos) break;
+        t = data.find('"', t + 8);
+        std::string target = (t == std::string::npos) ? std::string() : json_read_string(data, t);
+        i = (t == std::string::npos) ? q : t;
+        if (!bytes.empty() && !target.empty()) {
+            g_xlate[pms_fnv1a(bytes.data(), (uint32_t)bytes.size())] = target;
+        }
+    }
+    g_xlate_armed.store(!g_xlate.empty(), std::memory_order_relaxed);
+    std::fprintf(stderr, "[PMS] translations loaded: %zu entries from %s\n",
+                 g_xlate.size(), path.c_str());
+    std::fflush(stderr);
+}
+
+void maybe_reload_translations() {
+    std::lock_guard<std::mutex> lk(g_xlate_mtx);
+    const std::filesystem::path p = pms::app_file("translations.json");
+    std::error_code ec;
+    auto mt = std::filesystem::last_write_time(p, ec);
+    if (ec) { // file missing
+        if (!g_xlate_ever_loaded) { g_xlate_ever_loaded = true; }
+        return;
+    }
+    if (!g_xlate_ever_loaded || mt != g_xlate_mtime) {
+        g_xlate_mtime = mt;
+        g_xlate_ever_loaded = true;
+        load_translations_locked();
+    }
+}
+
+bool write_guest_str(uint8_t* rdram, uint32_t va, const std::string& s) {
+    if (!pms_diag_rdram_range(va, (uint32_t)s.size() + 1)) return false;
+    const uint32_t pa = va & 0x1FFFFFFFu;
+    for (size_t k = 0; k < s.size(); ++k) rdram[(pa + k) ^ 3] = (uint8_t)s[k];
+    rdram[(pa + s.size()) ^ 3] = 0;
+    return true;
+}
+} // namespace
+
+// The PMS-J glyph drawer (emitted): draws one glyph at (r4=x, r5=y, r6=code)
+// and appends to the display list. We call it directly for proportional render.
+extern "C" void FUN_8001a3e4(uint8_t* rdram, recomp_context* ctx);
+// code -> glyph sheet index (emitted), used to locate a glyph's texture tile.
+extern "C" void FUN_80019f70(uint8_t* rdram, recomp_context* ctx);
+
+namespace {
+inline uint8_t guest_rb(uint8_t* rdram, uint32_t va) {
+    return pms_diag_rdram_range(va, 1) ? rdram[(va & 0x1FFFFFFFu) ^ 3] : 0;
+}
+
+// Fallback typographic ratios (percent of slot advance) used before a slot is
+// calibrated or if its font can't be measured.
+int glyph_width_pct(uint8_t c) {
+    static const uint8_t pct[95] = { // 0x20..0x7E
+        50,30,42,72,62,86,82,26,40,40,52,66,30,52,30,46,
+        62,62,62,62,62,62,62,62,62,62,30,30,66,66,66,55,
+        90,70,70,72,76,66,62,78,78,34,50,72,60,92,80,80,
+        68,80,72,66,62,78,70,96,72,68,64,40,46,40,55,60,
+        34,60,62,54,62,60,40,62,62,28,34,58,28,92,62,62,
+        62,62,46,52,42,62,58,88,58,58,52,46,26,46,60
+    };
+    if (c < 0x20 || c > 0x7E) return 60;
+    return pct[c - 0x20];
+}
+
+// Per-slot calibrated advances. The game fonts are monospace per slot (wide for
+// Latin). For RESIDENT proportional sheets we measure each glyph's real ink
+// width; for sheets streamed into a shared buffer (unmeasurable -> 'i' and 'm'
+// scan the same width) we fall back to a single tight uniform advance. Both
+// avoid the uneven/overlapping look of a fixed guess-table.
+struct SlotMetrics {
+    std::atomic<bool> ready{false};
+    bool proportional = false;
+    uint8_t adv[95] = {};   // per-glyph advance px (proportional)
+    uint8_t mono = 8;       // uniform advance px (non-proportional)
+};
+SlotMetrics g_slotm[8];
+std::mutex  g_slotm_mtx;
+
+// ink right-edge+1 (px) of glyph ch in slot's tile; 0 if blank, -1 if unreadable
+int measure_glyph(uint8_t* rdram, const recomp_context* ctx, uint8_t w, uint8_t h,
+                  uint32_t texbase, uint8_t ch) {
+    recomp_context g = *ctx; g.r4 = ch;
+    FUN_80019f70(rdram, &g);
+    const uint32_t tile = texbase + (uint32_t)g.r2 * (uint32_t)w * (uint32_t)h;
+    if (!pms_diag_rdram_range(tile, (uint32_t)w * h)) return -1;
+    for (int c = (int)w - 1; c >= 0; --c)
+        for (uint32_t y = 0; y < h; ++y)
+            if (guest_rb(rdram, tile + y * (uint32_t)w + (uint32_t)c) != 0) return c + 1;
+    return 0;
+}
+
+void calibrate_slot(uint8_t* rdram, const recomp_context* ctx, uint32_t fs,
+                    uint8_t slot, uint8_t slot_adv) {
+    if (slot >= 8 || g_slotm[slot].ready.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lk(g_slotm_mtx);
+    if (g_slotm[slot].ready.load(std::memory_order_relaxed)) return;
+    const uint32_t desc = fs + (uint32_t)slot * 8u;
+    const uint8_t h = guest_rb(rdram, desc + 1), w = guest_rb(rdram, desc + 2);
+    const uint32_t texbase = pms_diag_read_u32(rdram, desc + 4);
+    if (w == 0 || h == 0 || w > 64 || h > 64 ||
+        !pms_diag_rdram_range(texbase, (uint32_t)w * h)) {
+        return;  // not measurable yet — retry on a later draw
+    }
+    SlotMetrics& m = g_slotm[slot];
+    const int wi = measure_glyph(rdram, ctx, w, h, texbase, 'i');
+    const int wm = measure_glyph(rdram, ctx, w, h, texbase, 'm');
+    if (wi > 0 && wm > 0 && wi * 10 < wm * 7 && wm <= w) {   // 'i' clearly < 'm'
+        m.proportional = true;
+        for (int c = 0; c < 95; ++c) {
+            int iw = measure_glyph(rdram, ctx, w, h, texbase, (uint8_t)(0x20 + c));
+            if (iw <= 0) iw = (c == 0) ? (int)w / 3 : (int)w * glyph_width_pct(0x20 + c) / 100;
+            iw += 1;
+            m.adv[c] = (uint8_t)(iw < 2 ? 2 : (iw > 63 ? 63 : iw));
+        }
+    } else {                                                // monospace / ephemeral
+        int ma = (int)slot_adv * 62 / 100;
+        m.mono = (uint8_t)(ma < 4 ? 4 : ma);
+    }
+    m.ready.store(true, std::memory_order_release);
+}
+} // namespace
+
+// Forwarded from include/trace.h's TRACE_ENTRY() on every recompiled-fn entry.
+// Acts only for the string-draw printf; a cheap no-op for every other function.
+extern "C" void pkmnstadium_text_xlate(const char* name,
+                                       unsigned char* rdram, void* ctxv) {
+    // Reload check (and first load) every 1024 fn entries — not per call.
+    if ((g_xlate_calls.fetch_add(1, std::memory_order_relaxed) & 0x3FFu) == 0) {
+        maybe_reload_translations();
+    }
+    if (!g_xlate_armed.load(std::memory_order_relaxed)) return; // lock-free reject
+    if (parse_fun_pc(name) != 0x8001A944u) return;
+    if (rdram == nullptr || ctxv == nullptr) return;
+    recomp_context* ctx = static_cast<recomp_context*>(ctxv);
+
+    const uint32_t fmt = (uint32_t)ctx->r6;
+    uint8_t src[kSrcMax];
+    uint32_t len = 0;
+    const uint32_t pa = fmt & 0x1FFFFFFFu;
+    for (; len < kSrcMax; ++len) {
+        if (!pms_diag_rdram_range(fmt + len, 1)) break;
+        uint8_t c = rdram[(pa + len) ^ 3];
+        if (c == 0) break;
+        src[len] = c;
+    }
+    if (len == 0) return;
+
+    const uint64_t key = pms_fnv1a(src, len);
+    std::string eng;
+    {
+        std::lock_guard<std::mutex> lk(g_xlate_mtx);
+        auto it = g_xlate.find(key);
+        if (it == g_xlate.end()) return;
+        eng = it->second;
+    }
+    // Transient scratch on the caller's guest stack, well below any frame the
+    // original + _Printf will use (~0x300). Per-call sp -> reentrancy-safe.
+    const uint32_t sp = (uint32_t)ctx->r29;
+    if (sp < 0x80000C00u) return; // not enough stack headroom for scratch
+    const uint32_t scratch = (sp - 0x800u) & ~7u;
+    if (eng.size() > 0x300u) return;             // sanity cap
+
+    // %-format strings keep the original formatting path (dynamic args intact):
+    // swap the fmt pointer and let the original _Printf + render run.
+    if (eng.find('%') != std::string::npos) {
+        if (!write_guest_str(rdram, scratch, eng)) return;
+        ctx->r6 = scratch;
+        g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    // Static strings: self-render with PROPORTIONAL spacing — advance by each
+    // glyph's measured ink width (not a fixed monospaced step, which overlaps
+    // wide glyphs like m/w and over-spaces i/l). Then hand the original an empty
+    // fmt so it draws nothing (no double-draw). PMS_XLATE_GAP tunes letter gap.
+    const uint32_t st = pms_diag_read_u32(rdram, 0x800AD200u);
+    uint8_t line_h = 16, slot = 0, slot_adv = 12;
+    if (pms_diag_rdram_range(st, 0x40)) {
+        line_h   = guest_rb(rdram, st + 0x3Au);
+        slot     = guest_rb(rdram, st + 0x38u);
+        slot_adv = guest_rb(rdram, st + (uint32_t)slot * 8u);
+    }
+    if (line_h == 0) line_h = 16;
+    static const int gap = [] {
+        const char* e = std::getenv("PMS_XLATE_GAP");
+        int v = e ? std::atoi(e) : -1000;
+        return (v >= 0 && v <= 16) ? v : 1;   // extra px between glyphs
+    }();
+
+    calibrate_slot(rdram, ctx, st, slot, slot_adv);
+    const SlotMetrics& m = g_slotm[slot < 8 ? slot : 0];
+    const bool ready = m.ready.load(std::memory_order_acquire);
+
+    const int x0 = (int)(int16_t)(uint16_t)ctx->r4;
+    int x = x0;
+    int y = (int)(int16_t)(uint16_t)ctx->r5;
+    recomp_context g;
+    for (size_t i = 0; i < eng.size(); ++i) {
+        uint8_t c = (uint8_t)eng[i];
+        if (c == '\n') { y += (int)line_h; x = x0; continue; }
+        g = *ctx;
+        g.r4 = (uint32_t)(int32_t)x;   // glyphs are left-aligned within slot_adv
+        g.r5 = (uint32_t)(int32_t)y;
+        g.r6 = c;
+        FUN_8001a3e4(rdram, &g);
+        int adv;
+        if (ready && m.proportional && c >= 0x20 && c <= 0x7E) adv = m.adv[c - 0x20] + gap;
+        else if (ready)                                        adv = m.mono;
+        else adv = (int)slot_adv * glyph_width_pct(c) / 100 + gap;  // pre-calibration
+        if (adv < 3) adv = 3;
+        x += adv;
+    }
+    // Suppress the original draw with an empty fmt.
+    if (pms_diag_rdram_range(scratch, 1)) {
+        rdram[(scratch & 0x1FFFFFFFu) ^ 3] = 0;
+        ctx->r6 = scratch;
+    }
+    g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
+}
+
+// ---- Font-sheet dumper -----------------------------------------------------
+//
+// The text system's state lives behind a pointer at 0x800AD200 (= US oracle
+// D_800AC870). The struct holds an array of 8-byte font-slot descriptors at
+// offset 0, then state fields:
+//   desc[slot]: [0]=advance, [1]=tile height, [2]=tile width, [4..7]=texture
+//               base addr (RDRAM); slots occupy +0x00..+0x37 (7 slots).
+//   +0x38 current slot, +0x39 char spacing, +0x3A line height, +0x3B flags.
+// The glyph drawer (0x8001A3E4) loads each glyph as an 8-bit (I/IA) tile from
+// base + glyph_index*w*h. Dumping the sheets answers the gating translation
+// question: does the font contain Latin glyphs (so ASCII <0x80 single-byte
+// codes render English directly)? Render the .i8 dumps with tools/
+// pms_fontrender.py and look.
+extern "C" void pkmnstadium_fontdump(void) {
+    const std::string rpt = pms::app_file("fontdump.log").string();
+    FILE* f = std::fopen(rpt.c_str(), "w");
+    if (!f) { std::fprintf(stderr, "[PMS] fontdump: cannot open %s\n", rpt.c_str()); return; }
+
+    unsigned char* rdram = recomp_runtime_get_rdram();
+    if (rdram == nullptr) { std::fprintf(f, "rdram not set\n"); std::fclose(f); return; }
+
+    const uint32_t fs = pms_diag_read_u32(rdram, 0x800AD200u);
+    std::fprintf(f, "=== font dump ===\n");
+    std::fprintf(f, "  font-state ptr @0x800AD200 -> 0x%08X\n", fs);
+    if (!pms_diag_rdram_range(fs, 0x40)) {
+        std::fprintf(f, "  (font state not yet initialized / out of range)\n");
+        std::fclose(f);
+        std::fprintf(stderr, "[PMS] fontdump: font state uninitialized (0x%08X)\n", fs);
+        return;
+    }
+    uint8_t state[0x40];
+    pms_diag_copy_bytes(rdram, fs, state, sizeof(state));
+    std::fprintf(f, "  cur_slot=%u spacing=%u line_height=%u flags=0x%02X\n\n",
+                 state[0x38], state[0x39], state[0x3A], state[0x3B]);
+
+    std::fprintf(f, "  slot  adv  w    h    texbase     dumped\n");
+    for (uint32_t slot = 0; slot < 7; ++slot) {
+        const uint32_t desc = fs + slot * 8u;
+        uint8_t d[8];
+        pms_diag_copy_bytes(rdram, desc, d, sizeof(d));
+        const uint8_t  adv = d[0];
+        const uint8_t  h   = d[1];
+        const uint8_t  w   = d[2];
+        const uint32_t texbase = pms_diag_read_u32(rdram, desc + 4u);
+
+        if (!pms_diag_rdram_range(texbase, (uint32_t)w * h) || w == 0 || h == 0 ||
+            w > 64 || h > 64) {
+            std::fprintf(f, "  %u     %3u  %-4u %-4u 0x%08X  (skip)\n",
+                         slot, adv, w, h, texbase);
+            continue;
+        }
+        // Dump a generous region (up to 256 glyphs) so the full sheet is covered.
+        uint32_t bytes = (uint32_t)w * h * 256u;
+        if (bytes > 0x40000u) bytes = 0x40000u;
+        if (!pms_diag_rdram_range(texbase, bytes)) {
+            bytes = 0x800000u - (texbase & 0x1FFFFFFFu); // clamp to end of RDRAM
+            if (bytes > 0x40000u) bytes = 0x40000u;
+        }
+        char name[32];
+        std::snprintf(name, sizeof(name), "font_slot%u.i8", slot);
+        const std::string outp = pms::app_file(name).string();
+        FILE* of = std::fopen(outp.c_str(), "wb");
+        uint32_t wrote = 0;
+        if (of) {
+            uint8_t chunk[4096];
+            for (uint32_t off = 0; off < bytes; off += sizeof(chunk)) {
+                uint32_t n = bytes - off;
+                if (n > sizeof(chunk)) n = sizeof(chunk);
+                pms_diag_copy_bytes(rdram, texbase + off, chunk, n);
+                wrote += (uint32_t)std::fwrite(chunk, 1, n, of);
+            }
+            std::fclose(of);
+        }
+        std::fprintf(f, "  %u     %3u  %-4u %-4u 0x%08X  %u bytes -> %s (tile %ux%u)\n",
+                     slot, adv, w, h, texbase, wrote, name, w, h);
+    }
+    std::fclose(f);
+    std::fprintf(stderr, "[PMS] fontdump written: %s\n", rpt.c_str());
+    std::fflush(stderr);
 }
 
 // Controlled-abort dump. Writes a small report next to the exe so a lookup-miss

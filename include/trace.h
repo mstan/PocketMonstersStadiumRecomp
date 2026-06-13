@@ -26,13 +26,34 @@ extern "C" {
 
 void pkmnstadium_trace_push(const char *name);
 
+/* Text-draw discovery census (diagnostics.cpp). Armed by env PMS_TEXTPROBE=1;
+ * a no-op (single bool check) otherwise. Records function entries whose args
+ * match the string-draw signature so the PMS-J text-printf function can be
+ * found empirically. ctx/rdram are in scope at every TRACE_ENTRY() call site
+ * (they are the recompiled function's parameters). */
+void pkmnstadium_textdraw_probe(const char *name, unsigned int ra,
+                                unsigned int a0, unsigned int a1,
+                                unsigned int a2, unsigned int a3);
+
+/* Runtime English-translation hook (diagnostics.cpp). No-op for every function
+ * except the string-draw printf; on a KV hit it repoints the fmt arg (ctx->r6)
+ * at an English replacement so the original renders English. ctx/rdram are in
+ * scope at every TRACE_ENTRY() call site (the recompiled fn's parameters).
+ * Passed as void* / unsigned char* to keep this header dependency-free. */
+void pkmnstadium_text_xlate(const char *name, unsigned char *rdram, void *ctx);
+
 #ifdef __cplusplus
 }
 #endif
 
 /* Engine emits these as bare `TRACE_ENTRY()` / `TRACE_RETURN()` without a
  * trailing `;` — bake the terminator into the macro. */
-#define TRACE_ENTRY()  pkmnstadium_trace_push(__func__);
+#define TRACE_ENTRY()                                                         \
+    pkmnstadium_trace_push(__func__);                                         \
+    pkmnstadium_textdraw_probe(__func__, (unsigned int)(ctx)->r31,            \
+                               (unsigned int)(ctx)->r4, (unsigned int)(ctx)->r5, \
+                               (unsigned int)(ctx)->r6, (unsigned int)(ctx)->r7); \
+    pkmnstadium_text_xlate(__func__, (unsigned char*)(rdram), (void*)(ctx));
 #define TRACE_RETURN()
 
 #endif /* PMS_TRACE_H */

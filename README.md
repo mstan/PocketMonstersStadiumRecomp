@@ -44,6 +44,48 @@ layer — is documented in [`FINDINGS.md`](FINDINGS.md).
 - Deeper play paths still hit unregistered-overlay lookup misses
   (`get_function` trampoline aborts) before some screens.
 
+## English translation patch
+
+PMS-J ships only in Japanese. This project includes an **optional runtime
+English-translation layer** that replaces the game's on-screen Japanese with
+English as it is drawn — no ROM modification, no asset re-packing. The main
+menu, battle/tournament setup, cup and rule descriptions, rental Pokémon,
+moves, types and stat screens are translated (269 strings and growing).
+
+**How it works (short version):** the recompiled game funnels almost all of
+its text through one string-draw routine. A hook reads the source bytes at
+that routine, hashes them, looks the hash up in a small JSON table
+([`translations.json`](translations.json)), and on a hit re-renders the
+English replacement through the game's own font glyphs (the font already
+contains Latin letters, so no glyph injection is needed). Untranslated text
+falls through unchanged, and the table hot-reloads while the game runs.
+Replacement text is not bounded by the original length, and Latin spacing is
+tightened so English fits the Japanese text boxes.
+
+The hook is built on the always-on diagnostic-ring + per-function trace
+infrastructure in the runtime fork. **For the full design and internals, see
+the [N64ModernRuntime fork](https://github.com/mstan/N64ModernRuntime#runtime-text-translation-hook)**
+— the runtime that exposes the guest-memory access and trace surface this is
+built on.
+
+**Using / extending it:**
+
+```bash
+# Translations live next to the executable as translations.json (the repo
+# root copy is the canonical data). Regenerate it from the source table any
+# time — it hot-reloads, no rebuild needed:
+python tools/pms_build_translations.py build      # tools/key_en.tsv -> build/translations.json
+
+# Capture the strings on screens you visit (always-on; survives crashes),
+# then list what still needs translating and add lines to tools/key_en.tsv:
+python tools/pms_build_translations.py decode     # accumulate -> tools/strings_decoded.tsv
+python tools/pms_build_translations.py todo       # -> tools/untranslated.tsv (key <TAB> Japanese)
+```
+
+Run with `PMS_TEXTPROBE=1` to arm string capture (and the `textdump` /
+`stringdump` / `fontdump` debug-server commands). `PMS_XLATE_GAP` tunes the
+letter spacing. The capture/translate tooling lives in [`tools/`](tools/).
+
 ## ROM
 
 | Field  | Value |

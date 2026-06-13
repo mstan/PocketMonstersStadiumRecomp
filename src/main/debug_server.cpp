@@ -29,6 +29,11 @@
 
 #include "debug_server.h"
 
+// Text-draw discovery census dumper + font-sheet dumper (diagnostics.cpp).
+extern "C" void pkmnstadium_textdraw_dump(void);
+extern "C" void pkmnstadium_fontdump(void);
+extern "C" void pkmnstadium_stringdump(void);
+
 namespace pms::dbg {
 
 std::atomic<bool>     g_fast_forward{false};
@@ -218,6 +223,25 @@ static std::string handle_line(const std::string& raw_line) {
         float v = std::clamp(get_float(line, "value", 1.0f), 0.0f, 1.0f);
         g_audio_volume.store(v);
         return R"({"ok":true})";
+    }
+    if (cmd == "textdump") {
+        // Dump the text-draw discovery census (see diagnostics.cpp). Free-run
+        // to the screen of interest, then send this to identify the string-draw
+        // function + inventory live strings. Requires launch with PMS_TEXTPROBE=1.
+        pkmnstadium_textdraw_dump();
+        return R"({"ok":true,"wrote":"textdraw_probe.log"})";
+    }
+    if (cmd == "stringdump") {
+        // Dump the distinct-string inventory (every string drawn by the
+        // string-draw printf). Requires PMS_TEXTPROBE=1. Sweep all screens first.
+        pkmnstadium_stringdump();
+        return R"({"ok":true,"wrote":"stringdump.log"})";
+    }
+    if (cmd == "fontdump") {
+        // Dump font-slot descriptors + sheet textures (diagnostics.cpp) to
+        // answer the Latin-glyph question. Free-run to a text screen first.
+        pkmnstadium_fontdump();
+        return R"({"ok":true,"wrote":"fontdump.log + font_slotN.i8"})";
     }
     if (cmd == "quit") {
         std::fflush(stdout);
