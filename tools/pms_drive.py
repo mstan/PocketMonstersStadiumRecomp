@@ -148,6 +148,8 @@ def main(argv) -> int:
             elif act.startswith("jit:"):
                 addr = act.split(":", 1)[1]
                 print("jit_test " + json.dumps(c.command("jit_test", addr=addr)))
+            elif act == "evictall":
+                print("jit_evict_all " + json.dumps(c.command("jit_evict_all")))
             else:
                 print(f"unknown action: {act}", file=sys.stderr)
         c.command("clear_input")

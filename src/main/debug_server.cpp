@@ -39,6 +39,7 @@ extern "C" void pkmnstadium_stringdump(void);
 extern "C" void recomp_debug_dump_loaded_sections(void);
 extern "C" int  recomp_debug_probe_lookup(uint32_t addr);
 extern "C" int  recomp_debug_probe_pointer_site(uint32_t* out_addr);
+extern "C" int  recomp_debug_jit_evict_all_resident(void);
 extern "C" int  recomp_debug_jit_test(uint32_t vram, uint32_t* out_func_size,
                                       uint32_t* out_code_size,
                                       char* out_err, size_t out_err_cap);
@@ -288,6 +289,16 @@ static std::string handle_line(const std::string& raw_line) {
             "{\"ok\":true,\"addr\":\"0x%08X\",\"jit_ok\":%s,"
             "\"func_size\":%u,\"code_size\":%u,\"err\":\"%s\"}",
             addr, rc == 0 ? "true" : "false", fsize, csize, err);
+        return buf;
+    }
+    if (cmd == "jit_evict_all") {
+        // B3 in-game execution test: evict all resident functions so their
+        // next indirect call routes through the JIT tier. Safe (B3 failures
+        // restore the static func). Check jit_compiles in captures afterward.
+        const int n = recomp_debug_jit_evict_all_resident();
+        char buf[96];
+        std::snprintf(buf, sizeof(buf),
+            "{\"ok\":true,\"evicted\":%d}", n);
         return buf;
     }
     if (cmd == "probe_pointer_site") {
