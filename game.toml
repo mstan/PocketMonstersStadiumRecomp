@@ -38,6 +38,25 @@ functions_per_output_file = 32
 # we validate the symbol set. Flip on once boot is being debugged.
 trace_mode = true
 
+# Authoritative function-entry seeds for decompressed fragments — the engine
+# CFG walk can't reach indirect jalr / data-table function pointers, so an
+# entry only reached that way misses get_function at runtime. Each VRAM here
+# that lands inside a decompressed section becomes a dispatch alias (interior)
+# or a standalone function (gap). This is the sink the runtime capture/
+# fold-back loop appends to (ISSUES #1 / CRASH-001). Populate from the runtime
+# capture manifest (which reports the exact fragment + offset + call form) —
+# naive crash-address guesses do NOT map cleanly (synthetic per-variant link
+# addrs; some miss addrs are relocated pointer VALUES, not code entries).
+force_function_vrams = [
+    # Normally EMPTY: the universal jal-return dispatch-label pass in
+    # N64Recomp decompressed.cpp makes every interior return point resumable,
+    # and the librecomp lookup-miss self-heal dispatches into the resident
+    # enclosing function — so interior-return misses (e.g. the captured
+    # CRASH-001 0x8212D600 inside func_8212D504, and 0x82173CEC) no longer
+    # need per-address seeding. Seed here only for true gap/standalone
+    # entries the runtime self-heal can't reach (none known yet).
+]
+
 [[input.decompressed_section_pattern]]
 base_name = "raw_fragment"
 vram = 0x00000000
