@@ -48,6 +48,8 @@ trace_mode = true
 # naive crash-address guesses do NOT map cleanly (synthetic per-variant link
 # addrs; some miss addrs are relocated pointer VALUES, not code entries).
 force_function_vrams = [
+
+
     # Normally EMPTY: the universal jal-return dispatch-label pass in
     # N64Recomp decompressed.cpp makes every interior return point resumable,
     # and the librecomp lookup-miss self-heal dispatches into the resident
@@ -55,6 +57,21 @@ force_function_vrams = [
     # CRASH-001 0x8212D600 inside func_8212D504, and 0x82173CEC) no longer
     # need per-address seeding. Seed here only for true gap/standalone
     # entries the runtime self-heal can't reach (none known yet).
+    # >>> BEGIN auto-folded from runtime_captures.json -- managed by tools/fold_captures.py
+    0x82117ED4,  # outside-loaded hit_count=2366
+    0x82117F08,  # outside-loaded hit_count=2366
+    0x821186F0,  # outside-loaded hit_count=2366
+    0x82118708,  # outside-loaded hit_count=2366
+    0x8211882C,  # outside-loaded hit_count=2365
+    0x82118864,  # outside-loaded hit_count=2365
+    0x82118F88,  # outside-loaded hit_count=2365
+    0x82118FA0,  # outside-loaded hit_count=2365
+    0x82119D74,  # outside-loaded hit_count=1
+    0x8211A20C,  # outside-loaded hit_count=1
+    0x8211A244,  # outside-loaded hit_count=1
+    0x8211A27C,  # outside-loaded hit_count=1
+    0x8211A2B4,  # outside-loaded hit_count=1
+    # <<< END auto-folded (do not edit between markers by hand)
 ]
 
 [[input.decompressed_section_pattern]]
