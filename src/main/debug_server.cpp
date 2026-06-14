@@ -39,6 +39,9 @@ extern "C" void pkmnstadium_stringdump(void);
 extern "C" void recomp_debug_dump_loaded_sections(void);
 extern "C" int  recomp_debug_probe_lookup(uint32_t addr);
 extern "C" int  recomp_debug_probe_pointer_site(uint32_t* out_addr);
+extern "C" int  recomp_debug_jit_test(uint32_t vram, uint32_t* out_func_size,
+                                      uint32_t* out_code_size,
+                                      char* out_err, size_t out_err_cap);
 
 namespace pms::dbg {
 
@@ -266,6 +269,25 @@ static std::string handle_line(const std::string& raw_line) {
         std::snprintf(buf, sizeof(buf),
             "{\"ok\":true,\"addr\":\"0x%08X\",\"missed\":%s}",
             addr, missed ? "true" : "false");
+        return buf;
+    }
+    if (cmd == "jit_test") {
+        // B3 validation: compile-only forced JIT of a RESIDENT function
+        // {"addr":"0x80......"} through the runtime LiveRecomp pipeline,
+        // without registering it. Pick a main-RDRAM (0x80000000-0x807FFFFF)
+        // function; overlay link addresses are (correctly) rejected.
+        const std::string addr_s = get_str(line, "addr");
+        const uint32_t addr = (uint32_t)std::strtoul(addr_s.c_str(), nullptr, 0);
+        uint32_t fsize = 0, csize = 0;
+        char err[192];
+        const int rc = recomp_debug_jit_test(addr, &fsize, &csize, err, sizeof(err));
+        // Escape quotes/backslashes in err for JSON safety (kept simple).
+        for (char* p = err; *p; ++p) { if (*p == '"' || *p == '\\') *p = '\''; }
+        char buf[320];
+        std::snprintf(buf, sizeof(buf),
+            "{\"ok\":true,\"addr\":\"0x%08X\",\"jit_ok\":%s,"
+            "\"func_size\":%u,\"code_size\":%u,\"err\":\"%s\"}",
+            addr, rc == 0 ? "true" : "false", fsize, csize, err);
         return buf;
     }
     if (cmd == "probe_pointer_site") {

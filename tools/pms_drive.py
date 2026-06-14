@@ -145,6 +145,9 @@ def main(argv) -> int:
             elif act.startswith("probe:"):
                 addr = act.split(":", 1)[1]
                 print("probe_lookup " + json.dumps(c.command("probe_lookup", addr=addr)))
+            elif act.startswith("jit:"):
+                addr = act.split(":", 1)[1]
+                print("jit_test " + json.dumps(c.command("jit_test", addr=addr)))
             else:
                 print(f"unknown action: {act}", file=sys.stderr)
         c.command("clear_input")
