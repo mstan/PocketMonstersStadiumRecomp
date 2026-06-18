@@ -1145,9 +1145,10 @@ const uint8_t kWlTrainer[] = {0xA5,0xC8,0xA5,0xEC,0xA1,0xBC,0xA5,0xCA,0xA1,0xBC}
 const uint8_t kWlBack[]    = {0xA4,0xE2,0xA4,0xC9,0xA4,0xEB};                     // もどる
 const uint8_t kWlConfirm[] = {0xA4,0xAB,0xA4,0xAF,0xA4,0xCB,0xA4,0xF3};           // かくにん
 const uint8_t kWlGround[]  = {0xA4,0xB8,0xA4,0xE1,0xA4,0xF3};                     // じめん (Ground type)
+const uint8_t kWlNormalT[] = {0xA5,0xCE,0xA1,0xBC,0xA5,0xDE,0xA5,0xEB};           // ノーマル (Normal type box)
 const WatchStr g_watch[] = {
     {kWlTrainer, 10, "Trainer"}, {kWlBack, 6, "Back"}, {kWlConfirm, 8, "Confirm"},
-    {kWlGround, 6, "Ground"},
+    {kWlGround, 6, "Ground"}, {kWlNormalT, 8, "NormalT"},
 };
 static const char* kSrcName[8] = {"a0/r4","a1/r5","a2/r6","a3/r7",
                                   "sp+10","sp+14","sp+18","sp+1C"};
@@ -1192,14 +1193,115 @@ void xlate_discovery(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
     }
 }
 
-// Generalized translation for class-1 text-draw routines OTHER than
-// kStringDrawPC (the menu/selection/description siblings, e.g. 0x8002C1B4 /
-// 0x82005D90 / 0x80028060). They share the (x=a0, y=a1, str=a2) convention, so
-// the source string is at ctx->r6. On a KV hit we repoint r6 at an English
-// replacement on the guest stack and let the ORIGINAL routine render it in its
-// own layout (fmt-swap — safe for any layout incl. shadow/overlay text). Runs
-// only for PCs the census flagged as text drawers (cheap lock-free set gate),
-// and only translates KNOWN strings (KV-gated), so a stray pointer is harmless.
+// Self-render a static (no-%) English string at (r4,r5) using the game's glyph
+// drawer, with PROPORTIONAL spacing and per-line AUTO-FIT to the original JP
+// footprint, then suppress the caller's own draw via an empty fmt at r6. Shared
+// by kStringDrawPC AND the class-1 siblings (titles/menus/move names) — all use
+// x=r4, y=r5, str=r6, so giving them the fit-aware renderer stops English from
+// spilling past where the Japanese did. `scratch` is caller-provided guest
+// stack space. Returns true on success.
+bool self_render_static(unsigned char* rdram, recomp_context* ctx,
+                        const uint8_t* src, uint32_t len, const std::string& eng,
+                        uint32_t scratch) {
+    const uint32_t st = pms_diag_read_u32(rdram, 0x800AD200u);
+    uint8_t line_h = 16, slot = 0, slot_adv = 12;
+    if (pms_diag_rdram_range(st, 0x40)) {
+        line_h   = guest_rb(rdram, st + 0x3Au);
+        slot     = guest_rb(rdram, st + 0x38u);
+        slot_adv = guest_rb(rdram, st + (uint32_t)slot * 8u);
+    }
+    if (line_h == 0) line_h = 16;
+    static const int gap = [] {
+        const char* e = std::getenv("PMS_XLATE_GAP");
+        int v = e ? std::atoi(e) : -1000;
+        return (v >= 0 && v <= 16) ? v : 1;   // extra px between glyphs
+    }();
+
+    calibrate_slot(rdram, ctx, st, slot, slot_adv);
+    const SlotMetrics& m = g_slotm[slot < 8 ? slot : 0];
+    const bool ready = m.ready.load(std::memory_order_acquire);
+
+    auto adv_for = [&](uint8_t c) -> int {
+        int a;
+        if (ready && m.proportional && c >= 0x20 && c <= 0x7E) a = m.adv[c - 0x20] + gap;
+        else if (ready)                                        a = m.mono;
+        else a = (int)slot_adv * glyph_width_pct(c) / 100 + gap;
+        return a < 3 ? 3 : a;
+    };
+
+    // AUTO-FIT: condense each line so the English fits the original Japanese
+    // footprint (jp_glyphs * full-width slot_adv) — never spilling past where the
+    // JP text did. Kill-switch PMS_XLATE_FIT=0. (Condenses inter-glyph advance;
+    // the glyph drawer is fixed-size, so very large ratios pack tightly.)
+    static const bool fit_on = [] {
+        const char* e = std::getenv("PMS_XLATE_FIT");
+        return !(e && e[0] == '0');
+    }();
+    constexpr int kMaxLines = 24;
+    float line_scale[kMaxLines];
+    for (int i = 0; i < kMaxLines; ++i) line_scale[i] = 1.0f;
+    if (fit_on && slot_adv > 0) {
+        int en_w[kMaxLines] = {0}; int en_line = 0;
+        for (size_t i = 0; i < eng.size(); ++i) {
+            uint8_t c = (uint8_t)eng[i];
+            if (c == '\n') { if (en_line < kMaxLines - 1) ++en_line; continue; }
+            if (en_line < kMaxLines) en_w[en_line] += adv_for(c);
+        }
+        const int en_count = en_line + 1;
+        int jp_w[kMaxLines] = {0}; int jp_line = 0;
+        for (uint32_t i = 0; i < len; ) {
+            uint8_t c = src[i];
+            if (c == 0x0A) { if (jp_line < kMaxLines - 1) ++jp_line; ++i; continue; }
+            i += (c >= 0x80) ? 2u : 1u;            // 2-byte JIS vs 1-byte glyph
+            if (jp_line < kMaxLines) jp_w[jp_line] += (int)slot_adv;
+        }
+        const int jp_count = jp_line + 1;
+        if (en_count == jp_count) {
+            for (int l = 0; l < en_count && l < kMaxLines; ++l)
+                if (en_w[l] > jp_w[l] && en_w[l] > 0)
+                    line_scale[l] = (float)jp_w[l] / (float)en_w[l];
+        } else {
+            int et = 0, jt = 0;
+            for (int l = 0; l < kMaxLines; ++l) { et += en_w[l]; jt += jp_w[l]; }
+            const float s = (et > jt && et > 0) ? (float)jt / (float)et : 1.0f;
+            for (int l = 0; l < kMaxLines; ++l) line_scale[l] = s;
+        }
+    }
+
+    const int x0 = (int)(int16_t)(uint16_t)ctx->r4;
+    int x = x0;
+    int y = (int)(int16_t)(uint16_t)ctx->r5;
+    int line = 0;
+    recomp_context g;
+    for (size_t i = 0; i < eng.size(); ++i) {
+        uint8_t c = (uint8_t)eng[i];
+        if (c == '\n') { y += (int)line_h; x = x0; if (line < kMaxLines - 1) ++line; continue; }
+        g = *ctx;
+        g.r4 = (uint32_t)(int32_t)x;   // glyphs are left-aligned within slot_adv
+        g.r5 = (uint32_t)(int32_t)y;
+        g.r6 = c;
+        FUN_8001a3e4(rdram, &g);
+        int adv = adv_for(c);
+        const float sc = line_scale[line < kMaxLines ? line : kMaxLines - 1];
+        if (sc < 1.0f) { adv = (int)((float)adv * sc + 0.5f); if (adv < 3) adv = 3; }
+        x += adv;
+    }
+    // Suppress the caller's own draw with an empty fmt.
+    if (pms_diag_rdram_range(scratch, 1)) {
+        rdram[(scratch & 0x1FFFFFFFu) ^ 3] = 0;
+        ctx->r6 = scratch;
+    }
+    return true;
+}
+
+// Generalized translation for text-draw routines OTHER than kStringDrawPC.
+// The class-1 siblings (menus/titles/move names, e.g. 0x8002C1B4 / 0x82005D90 /
+// 0x80028060) share the (x=a0, y=a1, str=a2) convention, so the source string
+// is at ctx->r6 AND x/y are at r4/r5 — meaning they can use the SAME fit-aware
+// self-renderer as kStringDrawPC (so their English stops spilling past the JP
+// footprint). _Printf (no x/y in r4/r5) and %-templates keep the fmt-swap path.
+// Runs only for PCs the census flagged as text drawers (lock-free set gate) and
+// only translates KNOWN strings (KV-gated), so a stray pointer is harmless.
 void xlate_general(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
     if (!textpc_contains(pc)) return;
     uint8_t src[kSrcMax];
@@ -1217,6 +1319,11 @@ void xlate_general(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
     if (sp < 0x80000C00u) return;                  // need stack headroom
     const uint32_t scratch = (sp - 0x800u) & ~7u;  // per-call -> reentrancy-safe
     if (eng.size() > 0x300u) return;
+    // fmt-swap: repoint r6 at the English replacement and let the ORIGINAL
+    // routine render it. (Self-rendering these here -- calling the glyph drawer
+    // and suppressing the original via an empty r6 -- destabilized class-1
+    // routines that use r6 for more than the draw, so auto-fit for them is
+    // pursued separately; see notes. kStringDrawPC keeps its self-render fit.)
     if (!write_guest_str(rdram, scratch, eng)) return;
     ctx->r6 = scratch;
     g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
@@ -1277,53 +1384,10 @@ extern "C" void pkmnstadium_text_xlate(const char* name,
         return;
     }
 
-    // Static strings: self-render with PROPORTIONAL spacing — advance by each
-    // glyph's measured ink width (not a fixed monospaced step, which overlaps
-    // wide glyphs like m/w and over-spaces i/l). Then hand the original an empty
-    // fmt so it draws nothing (no double-draw). PMS_XLATE_GAP tunes letter gap.
-    const uint32_t st = pms_diag_read_u32(rdram, 0x800AD200u);
-    uint8_t line_h = 16, slot = 0, slot_adv = 12;
-    if (pms_diag_rdram_range(st, 0x40)) {
-        line_h   = guest_rb(rdram, st + 0x3Au);
-        slot     = guest_rb(rdram, st + 0x38u);
-        slot_adv = guest_rb(rdram, st + (uint32_t)slot * 8u);
-    }
-    if (line_h == 0) line_h = 16;
-    static const int gap = [] {
-        const char* e = std::getenv("PMS_XLATE_GAP");
-        int v = e ? std::atoi(e) : -1000;
-        return (v >= 0 && v <= 16) ? v : 1;   // extra px between glyphs
-    }();
-
-    calibrate_slot(rdram, ctx, st, slot, slot_adv);
-    const SlotMetrics& m = g_slotm[slot < 8 ? slot : 0];
-    const bool ready = m.ready.load(std::memory_order_acquire);
-
-    const int x0 = (int)(int16_t)(uint16_t)ctx->r4;
-    int x = x0;
-    int y = (int)(int16_t)(uint16_t)ctx->r5;
-    recomp_context g;
-    for (size_t i = 0; i < eng.size(); ++i) {
-        uint8_t c = (uint8_t)eng[i];
-        if (c == '\n') { y += (int)line_h; x = x0; continue; }
-        g = *ctx;
-        g.r4 = (uint32_t)(int32_t)x;   // glyphs are left-aligned within slot_adv
-        g.r5 = (uint32_t)(int32_t)y;
-        g.r6 = c;
-        FUN_8001a3e4(rdram, &g);
-        int adv;
-        if (ready && m.proportional && c >= 0x20 && c <= 0x7E) adv = m.adv[c - 0x20] + gap;
-        else if (ready)                                        adv = m.mono;
-        else adv = (int)slot_adv * glyph_width_pct(c) / 100 + gap;  // pre-calibration
-        if (adv < 3) adv = 3;
-        x += adv;
-    }
-    // Suppress the original draw with an empty fmt.
-    if (pms_diag_rdram_range(scratch, 1)) {
-        rdram[(scratch & 0x1FFFFFFFu) ^ 3] = 0;
-        ctx->r6 = scratch;
-    }
-    g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
+    // Static strings: self-render with proportional spacing + per-line auto-fit
+    // (shared helper, also used by the class-1 sibling routines via xlate_general).
+    if (self_render_static(rdram, ctx, src, len, eng, scratch))
+        g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
 }
 
 // ---- Font-sheet dumper -----------------------------------------------------

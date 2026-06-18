@@ -44,11 +44,11 @@
 0xB8FFC150654C0390	COM
 0x991ED700C42FA790	*
 # --- description boxes ---
-0x8C3B0F2ED3A1154A	No GB Cartridge
+0x8C3B0F2ED3A1154A	No Pak
 0xB98684876032077E	No Game Boy game inserted.\nInsert one in the N64 Transfer\nPak to use all features.
 0x84EAC48597E3075F	No Pokemon game inserted.\nTo use your own Pokemon, turn off\nthe power, then insert a game\ninto the N64 Transfer Pak.
 0x1D7D43FE21C431A8	Battle with registered\nPokemon, or your friends.
-0xCA5AAF376F668DCB	Battle the computer\nor your friends.
+0xCA5AAF376F668DCB	Battle friends or COM
 0x41651F8AD715810B	Pick 6 from 40 kinds of\nPokemon and battle.\nNo level limit.
 0x1E989482DCCD779D	Crown the strongest trainer\nusing one of two rule sets.
 0x92CB149BFAE35395	Free-level battle.\n40 kinds of Pokemon\ncan be used.
@@ -202,8 +202,8 @@
 0x6E3C69F1E3348E25	Ultra Ball Cup
 0x9C6E579A152D33EF	Master Ball Cup
 # --- tournament descriptions ---
-0x7660B1EA40458FED	2nd Pokemon National Tournament.\nOfficial rules. 8 rounds incl. final.\n\nOpponents are familiar trainers\nfrom the Game Boy games.\nWin all 8 battles!
-0xC99A9AC07FBC30B5	1st Pokemon National Tournament.\nOfficial rules. 8 rounds incl. final.\n\nFace the Pokemon of trainers who\nreached the 1st event's final.\nThey are tough!
+0x7660B1EA40458FED	2nd Pokemon Nat'l Tournament\nOfficial rules. 8 rounds incl. final\n\nOpponents are familiar trainers\nfrom the Game Boy games.\nWin all 8 battles!
+0xC99A9AC07FBC30B5	1st Pokemon Nt Tournament.\nRules: 8 rounds incl. final.\n\nFace trainers who reached \nthe 1st event's final. \nThey are tough!
 0xFCFAF391C799EAD6	A tournament under 2nd Pokemon\nNational rules.\n33 kinds of Pokemon usable.
 0x6FED5D689951FA7A	View the 2nd Pokemon National\nrules explanation.
 # --- types (more) ---
@@ -292,3 +292,5 @@
 0xE01F824110FB8D87	Confirm
 0xA6085B5FCB25D4B4	Go! Paru Paru!
 0xCF03F498F170D304	Go! Iwa Iwa!
+0xFBA3FCE9C0EFC0DC	Go! Spi Spi!
+0xDCA886FF6C7C1EAA	Fury Attack
