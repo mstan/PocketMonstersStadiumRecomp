@@ -107,6 +107,17 @@ the game accepts them; needs verification — PMS may predate Yellow).
 ChatGPT-generated). Need a placeholder (Bulbasaur-based) until a proper
 one is supplied.
 
+*RmlUi cart-selection menu (user-requested 2026-06-18).* Plumb an
+RmlUi/recompui menu (part of the #3 launcher) that lets the user pick
+which GB cart to mount in the Transfer Pak for the GB Tower (R/B/Y →
+their Japanese equivalents). **Region constraint:** PMS-J's GB Tower is
+expected to accept only the **Japanese** versions of those carts
+(Pocket Monsters Aka/Midori/Ao/Pikachu = Red/Green/Blue/Yellow J), so
+the picker must validate/limit selections to JP ROMs — needs
+verification of exactly which carts PMS accepts. Today the cart is
+chosen only via env (`PSR_TRANSFER_PAK_P1_ROM/_SAVE`, US model); this UI
+replaces that with an in-app selector.
+
 *Dependency.* The import/registration flow lives on a deep screen, so
 this likely needs **#1** resolved (or at least the registration path
 reachable) to exercise end-to-end. The accessory code itself is

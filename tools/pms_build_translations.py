@@ -19,6 +19,7 @@ Usage:
   python tools/pms_build_translations.py build
 """
 from __future__ import annotations
+import json
 import sys
 from pathlib import Path
 
@@ -150,6 +151,23 @@ def cmd_build():
         # english uses literal \n in the TSV -> real newline in JSON output
         en = en.replace("\\n", "\n")
         entries.append((r["src_hex"], r["jp"], en))
+    # MERGE-PRESERVE: never silently drop entries already in translations.json.
+    # Some strings were authored straight into the JSON (e.g. the battle-screen
+    # set in commit 7bc8a68) and have no key_en.tsv row; a from-scratch rebuild
+    # would lose them. Carry forward any existing entry whose src_hex isn't
+    # (re)produced from key_en. key_en always wins on conflict (it's first).
+    have = {sh.lower() for sh, _, _ in entries}
+    preserved = 0
+    if OUT.exists():
+        try:
+            for e in json.loads(OUT.read_text(encoding="utf-8")):
+                sh = str(e.get("src_hex", ""))
+                if sh and sh.lower() not in have:
+                    entries.append((sh, e.get("src_jp", ""), e.get("target", "")))
+                    have.add(sh.lower())
+                    preserved += 1
+        except (ValueError, OSError) as exc:
+            print(f"  [warn] could not merge existing {OUT.name}: {exc}")
     with OUT.open("w", encoding="utf-8") as f:
         f.write("[\n")
         for i, (sh, jp, en) in enumerate(entries):
@@ -157,7 +175,8 @@ def cmd_build():
             f.write(f'  {{ "src_hex": "{sh}", "src_jp": "{json_escape(jp)}", '
                     f'"target": "{json_escape(en)}" }}{comma}\n')
         f.write("]\n")
-    print(f"wrote {OUT}: {len(entries)} entries ({miss} unmatched keys)")
+    print(f"wrote {OUT}: {len(entries)} entries "
+          f"({miss} unmatched keys, {preserved} preserved from existing JSON)")
 
 
 def cmd_todo():

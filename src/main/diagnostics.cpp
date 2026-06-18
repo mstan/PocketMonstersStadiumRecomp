@@ -600,6 +600,11 @@ constexpr uint32_t kTextCandCap   = 256; // distinct PCs tracked
 constexpr uint32_t kTextSampleLen = 64;  // source bytes shown per PC (find aid)
 constexpr uint32_t kSrcMax        = 256; // max source string captured/hashed
 constexpr uint32_t kStringDrawPC  = 0x8001A944u; // PMS-J string-draw printf
+constexpr uint32_t kPrintfPC      = 0x80055CE0u; // PMS-J _Printf (vararg fmt);
+                                                 // a0=writeproc a1=dest a2=fmt.
+                                                 // Universal formatter chokepoint
+                                                 // for battle/overlay text not
+                                                 // covered by the class-1 conv.
 
 // FNV-1a 64 over raw source glyph bytes — the translation KV key.
 inline uint64_t pms_fnv1a(const uint8_t* p, uint32_t n) {
@@ -687,6 +692,67 @@ void strinv_upsert(const uint8_t* b, uint16_t len, uint16_t a0, uint16_t a1) {
     if (is_new) dump_stringinv_locked();
 }
 
+// ---- Generalized text-draw coverage ----------------------------------------
+// PMS draws text through MANY routines (~70 distinct PCs seen), not just
+// kStringDrawPC. Each takes the source string pointer in one of the first arg
+// registers (a0..a3). To translate ALL of them we (1) detect a text string in
+// any arg during the census, and (2) maintain a lock-free set of PCs proven to
+// draw text so the xlate hook only pays the arg-scan cost for real text PCs.
+
+// Does `ptr` reference a NUL-terminated EUC-JP/ASCII string of >=2 bytes whose
+// FIRST byte is plainly text? Fills out[0..*outlen). The RAM-range gate is the
+// real discriminator: coords/small ints and non-pointers are rejected here, so
+// only genuine RAM pointers reach the byte scan. Returns false otherwise.
+bool read_text_arg(unsigned char* rdram, uint32_t ptr, uint8_t* out, uint16_t* outlen) {
+    if (ptr < 0x80000000u || ptr >= 0x80800000u) return false; // RDRAM range only
+    if (!pms_diag_rdram_range(ptr, 2)) return false;
+    const uint32_t pa = ptr & 0x1FFFFFFFu;          // RDRAM is byte-swizzled (^3)
+    uint16_t n = 0;
+    bool terminated = false;
+    for (uint32_t i = 0; i < kSrcMax; ++i) {
+        if (!pms_diag_rdram_range(ptr + i, 1)) break;
+        unsigned char c = rdram[(pa + i) ^ 3];
+        if (c == 0) { terminated = (i >= 2); break; }
+        // EVERY byte must be valid EUC-JP/ASCII text (newline, printable ASCII,
+        // or a EUC-JP lead/kana byte). Rejects binary structs/pointers/markers.
+        const bool textish = (c == 0x0A) || (c >= 0x20 && c <= 0x7E) ||
+                             c == 0x8E || c == 0x8F || (c >= 0xA1 && c <= 0xFE);
+        if (!textish) return false;
+        out[n++] = c;
+    }
+    if (!terminated || n < 2) return false;
+    *outlen = n;
+    return true;
+}
+
+// Lock-free open-addressing set of text-draw PCs (slot value 0 == empty).
+constexpr uint32_t kTextPcSetN = 512;               // power of two; >> ~70 seen
+std::atomic<uint32_t> g_textpc_set[kTextPcSetN];
+inline bool textpc_contains(uint32_t pc) {
+    uint32_t h = (pc * 2654435761u) & (kTextPcSetN - 1);
+    for (uint32_t i = 0; i < kTextPcSetN; ++i) {
+        uint32_t v = g_textpc_set[(h + i) & (kTextPcSetN - 1)].load(std::memory_order_relaxed);
+        if (v == pc) return true;
+        if (v == 0) return false;
+    }
+    return false;
+}
+inline void textpc_add(uint32_t pc) {
+    if (pc == 0) return;
+    uint32_t h = (pc * 2654435761u) & (kTextPcSetN - 1);
+    for (uint32_t i = 0; i < kTextPcSetN; ++i) {
+        uint32_t idx = (h + i) & (kTextPcSetN - 1);
+        uint32_t v = g_textpc_set[idx].load(std::memory_order_relaxed);
+        if (v == pc) return;
+        if (v == 0) {
+            uint32_t expected = 0;
+            if (g_textpc_set[idx].compare_exchange_strong(expected, pc, std::memory_order_relaxed))
+                return;
+            if (g_textpc_set[idx].load(std::memory_order_relaxed) == pc) return;
+        }
+    }
+}
+
 struct TextDrawCand {
     uint32_t pc;                  // guest VRAM, parsed from "FUN_80XXXXXX"
     uint32_t ra;                  // representative caller (latest)
@@ -728,39 +794,46 @@ extern "C" void pkmnstadium_textdraw_probe(const char* name,
     if (!textprobe_armed()) {
         return;
     }
-    // Cheap reject: x/y must look like screen coords, not pointers/large ints.
-    if (a0 >= 0x1000u || a1 >= 0x1000u) {
-        return;
-    }
-    // a2 must point at a NUL-terminated run of nonzero bytes in RDRAM.
-    if (!pms_diag_rdram_range(a2, 2)) {
-        return;
-    }
     unsigned char* rdram = recomp_runtime_get_rdram();
     if (rdram == nullptr) {
         return;
     }
-    const uint32_t pa = a2 & 0x1FFFFFFFu; // RDRAM is byte-swizzled: read [^3]
+    const uint32_t pc = parse_fun_pc(name);
     uint8_t buf[kSrcMax];
     uint16_t len = 0;
-    bool terminated = false;
-    for (uint32_t i = 0; i < kSrcMax; ++i) {
-        if (!pms_diag_rdram_range(a2 + i, 1)) { break; }
-        unsigned char c = rdram[(pa + i) ^ 3];
-        if (c == 0) { terminated = (i > 0); break; }
-        buf[len++] = c;
+
+    // _Printf is the universal vararg formatter (a0=writeproc, a1=dest, a2=fmt).
+    // Most on-screen text — including battle/overlay labels NOT covered by the
+    // class-1 (x=a0,y=a1,str=a2) convention — is built through it. Inventory its
+    // format string (a2) regardless of the coord gate so authoring captures the
+    // battle strings, and flag it for the xlate hook.
+    if (pc == kPrintfPC) {
+        if (read_text_arg(rdram, a2, buf, &len)) {
+            g_text_qualifying.fetch_add(1, std::memory_order_relaxed);
+            strinv_upsert(buf, len, (uint16_t)a0, (uint16_t)a1);
+            textpc_add(pc);
+        }
+        return;
     }
-    if (!terminated || len < 2) {
-        return; // not a (multi-byte) string
+
+    // Class-1 text-draw convention (proven clean): x=a0, y=a1, str=a2. This is
+    // what the menu/selection/description routines all use (kStringDrawPC plus
+    // ~7 siblings like 0x8002C1B4 / 0x82005D90 / 0x80028060). The a0/a1 coord
+    // gate is the key precision filter — it rejects binary data and resource
+    // headers ("Yay0"/"PRESJPEG"/"DONE") that decode as valid EUC-JP by chance.
+    if (a0 >= 0x1000u || a1 >= 0x1000u) {
+        return; // a0,a1 must look like screen coords
+    }
+    if (!read_text_arg(rdram, a2, buf, &len)) {
+        return; // a2 must point at a NUL-terminated EUC-JP/ASCII text string
     }
 
     g_text_qualifying.fetch_add(1, std::memory_order_relaxed);
-    const uint32_t pc = parse_fun_pc(name);
 
-    // Authoritative distinct-string inventory for the string-draw printf.
-    if (pc == kStringDrawPC) {
-        strinv_upsert(buf, len, (uint16_t)a0, (uint16_t)a1);
-    }
+    // Inventory EVERY distinct string drawn by ANY class-1 text routine (the
+    // authoring source: stringdump.log), and flag the PC for the xlate hook.
+    strinv_upsert(buf, len, (uint16_t)a0, (uint16_t)a1);
+    textpc_add(pc);
 
     std::lock_guard<std::mutex> lk(g_textcand_mtx);
     TextDrawCand* slot = nullptr;
@@ -945,6 +1018,10 @@ void load_translations_locked() {
         }
     }
     g_xlate_armed.store(!g_xlate.empty(), std::memory_order_relaxed);
+    // Seed the universal formatter chokepoint so general coverage (battle/
+    // overlay text built via _Printf) works in normal play, not only during a
+    // PMS_TEXTPROBE capture (which is what otherwise populates the set).
+    textpc_add(kPrintfPC);
     std::fprintf(stderr, "[PMS] translations loaded: %zu entries from %s\n",
                  g_xlate.size(), path.c_str());
     std::fflush(stderr);
@@ -1057,10 +1134,98 @@ void calibrate_slot(uint8_t* rdram, const recomp_context* ctx, uint32_t fs,
     }
     m.ready.store(true, std::memory_order_release);
 }
+
+// ---- Targeted class-2 discovery --------------------------------------------
+// Find which routine draws specific known-untranslated strings, and via which
+// register/stack slot, to learn the battle-text convention (class-1 = a2/r6
+// does not cover them). Capture-only (PMS_TEXTPROBE). Appends to
+// xlate_discovery.log: one line per (pc, watch-string, source) first seen.
+struct WatchStr { const uint8_t* b; uint16_t n; const char* label; };
+const uint8_t kWlTrainer[] = {0xA5,0xC8,0xA5,0xEC,0xA1,0xBC,0xA5,0xCA,0xA1,0xBC}; // トレーナー
+const uint8_t kWlBack[]    = {0xA4,0xE2,0xA4,0xC9,0xA4,0xEB};                     // もどる
+const uint8_t kWlConfirm[] = {0xA4,0xAB,0xA4,0xAF,0xA4,0xCB,0xA4,0xF3};           // かくにん
+const uint8_t kWlGround[]  = {0xA4,0xB8,0xA4,0xE1,0xA4,0xF3};                     // じめん (Ground type)
+const WatchStr g_watch[] = {
+    {kWlTrainer, 10, "Trainer"}, {kWlBack, 6, "Back"}, {kWlConfirm, 8, "Confirm"},
+    {kWlGround, 6, "Ground"},
+};
+static const char* kSrcName[8] = {"a0/r4","a1/r5","a2/r6","a3/r7",
+                                  "sp+10","sp+14","sp+18","sp+1C"};
+std::mutex g_disc_mtx;
+uint64_t g_disc_seen[128];
+uint32_t g_disc_n = 0;
+
+bool guest_prefix_eq(unsigned char* rdram, uint32_t ptr, const uint8_t* want, uint16_t wlen) {
+    if (!pms_diag_rdram_range(ptr, (uint32_t)wlen + 1)) return false;
+    const uint32_t pa = ptr & 0x1FFFFFFFu;
+    for (uint16_t i = 0; i < wlen; ++i) if (rdram[(pa + i) ^ 3] != want[i]) return false;
+    return true;
+}
+
+void xlate_discovery(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
+    const uint32_t sp = (uint32_t)ctx->r29;
+    uint32_t srcs[8];
+    srcs[0] = (uint32_t)ctx->r4; srcs[1] = (uint32_t)ctx->r5;
+    srcs[2] = (uint32_t)ctx->r6; srcs[3] = (uint32_t)ctx->r7;
+    srcs[4] = pms_diag_read_u32(rdram, sp + 0x10); srcs[5] = pms_diag_read_u32(rdram, sp + 0x14);
+    srcs[6] = pms_diag_read_u32(rdram, sp + 0x18); srcs[7] = pms_diag_read_u32(rdram, sp + 0x1C);
+    for (uint32_t wi = 0; wi < sizeof(g_watch) / sizeof(g_watch[0]); ++wi) {
+        for (int s = 0; s < 8; ++s) {
+            if (!guest_prefix_eq(rdram, srcs[s], g_watch[wi].b, g_watch[wi].n)) continue;
+            const uint64_t k = ((uint64_t)pc << 8) | ((uint64_t)wi << 4) | (uint64_t)s;
+            std::lock_guard<std::mutex> lk(g_disc_mtx);
+            bool seen = false;
+            for (uint32_t i = 0; i < g_disc_n; ++i) if (g_disc_seen[i] == k) { seen = true; break; }
+            if (seen) continue;
+            if (g_disc_n < 128) g_disc_seen[g_disc_n++] = k;
+            const std::string path = pms::app_file("xlate_discovery.log").string();
+            FILE* f = std::fopen(path.c_str(), "a");
+            if (f) {
+                std::fprintf(f,
+                    "%-8s pc=0x%08X via %-6s  a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X sp=0x%08X ra=0x%08X\n",
+                    g_watch[wi].label, pc, kSrcName[s],
+                    (uint32_t)ctx->r4, (uint32_t)ctx->r5, (uint32_t)ctx->r6, (uint32_t)ctx->r7,
+                    sp, (uint32_t)ctx->r31);
+                std::fclose(f);
+            }
+        }
+    }
+}
+
+// Generalized translation for class-1 text-draw routines OTHER than
+// kStringDrawPC (the menu/selection/description siblings, e.g. 0x8002C1B4 /
+// 0x82005D90 / 0x80028060). They share the (x=a0, y=a1, str=a2) convention, so
+// the source string is at ctx->r6. On a KV hit we repoint r6 at an English
+// replacement on the guest stack and let the ORIGINAL routine render it in its
+// own layout (fmt-swap — safe for any layout incl. shadow/overlay text). Runs
+// only for PCs the census flagged as text drawers (cheap lock-free set gate),
+// and only translates KNOWN strings (KV-gated), so a stray pointer is harmless.
+void xlate_general(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
+    if (!textpc_contains(pc)) return;
+    uint8_t src[kSrcMax];
+    uint16_t len = 0;
+    if (!read_text_arg(rdram, (uint32_t)ctx->r6, src, &len)) return;
+    const uint64_t key = pms_fnv1a(src, len);
+    std::string eng;
+    {
+        std::lock_guard<std::mutex> lk(g_xlate_mtx);
+        auto it = g_xlate.find(key);
+        if (it == g_xlate.end()) return;
+        eng = it->second;
+    }
+    const uint32_t sp = (uint32_t)ctx->r29;
+    if (sp < 0x80000C00u) return;                  // need stack headroom
+    const uint32_t scratch = (sp - 0x800u) & ~7u;  // per-call -> reentrancy-safe
+    if (eng.size() > 0x300u) return;
+    if (!write_guest_str(rdram, scratch, eng)) return;
+    ctx->r6 = scratch;
+    g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
+}
 } // namespace
 
 // Forwarded from include/trace.h's TRACE_ENTRY() on every recompiled-fn entry.
-// Acts only for the string-draw printf; a cheap no-op for every other function.
+// Acts for kStringDrawPC (self-render path) and, via xlate_general, every other
+// text-draw routine the census discovered. A cheap no-op for non-text functions.
 extern "C" void pkmnstadium_text_xlate(const char* name,
                                        unsigned char* rdram, void* ctxv) {
     // Reload check (and first load) every 1024 fn entries — not per call.
@@ -1068,9 +1233,13 @@ extern "C" void pkmnstadium_text_xlate(const char* name,
         maybe_reload_translations();
     }
     if (!g_xlate_armed.load(std::memory_order_relaxed)) return; // lock-free reject
-    if (parse_fun_pc(name) != 0x8001A944u) return;
     if (rdram == nullptr || ctxv == nullptr) return;
     recomp_context* ctx = static_cast<recomp_context*>(ctxv);
+    const uint32_t pc = parse_fun_pc(name);
+    if (textprobe_armed()) xlate_discovery(rdram, ctx, pc); // capture-only
+    // Every text routine except the primary string-draw printf goes through the
+    // generalized fmt-swap path; kStringDrawPC keeps its proportional self-render.
+    if (pc != kStringDrawPC) { xlate_general(rdram, ctx, pc); return; }
 
     const uint32_t fmt = (uint32_t)ctx->r6;
     uint8_t src[kSrcMax];

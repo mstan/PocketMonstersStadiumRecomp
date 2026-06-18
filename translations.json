@@ -268,9 +268,14 @@
   { "src_hex": "a5c9a5eaa5eba4afa4c1a4d0a4b7", "src_jp": "ドリルくちばし", "target": "Drill Peck" },
   { "src_hex": "a5aaa5a6a5e0a4aca4a8a4b7", "src_jp": "オウムがえし", "target": "Mirror Move" },
   { "src_hex": "a4d8a4f3a4b7a4f3", "src_jp": "へんしん", "target": "Transform" },
-  { "src_hex": "a4d2a4f3a4b7", "src_jp": "ひんし", "target": "Fainted" },
-  { "src_hex": "a4d5a4c4a4a6", "src_jp": "ふつう", "target": "Normal" },
+  { "src_hex": "a5c8a5eca1bca5caa1bc", "src_jp": "トレーナー", "target": "Trainer" },
   { "src_hex": "a4bfa4bfa4aba4a6", "src_jp": "たたかう", "target": "Fight" },
   { "src_hex": "a5dda5b1a5e2a5f3", "src_jp": "ポケモン", "target": "Pokemon" },
-  { "src_hex": "a4cba4b2a4eb", "src_jp": "にげる", "target": "Run" }
+  { "src_hex": "a4cba4b2a4eb", "src_jp": "にげる", "target": "Run" },
+  { "src_hex": "a4d5a4c4a4a6", "src_jp": "ふつう", "target": "Normal" },
+  { "src_hex": "a4e2a4c9a4eb", "src_jp": "もどる", "target": "Back" },
+  { "src_hex": "a4aba4afa4cba4f3", "src_jp": "かくにん", "target": "Confirm" },
+  { "src_hex": "a4e6a4b1a4c3a1aaa5d1a5eba5d1a5eb", "src_jp": "ゆけっ！パルパル", "target": "Go! Paru Paru!" },
+  { "src_hex": "a4e6a4b1a4c3a1aaa5a4a5efa5a4a5ef", "src_jp": "ゆけっ！イワイワ", "target": "Go! Iwa Iwa!" },
+  { "src_hex": "a4d2a4f3a4b7", "src_jp": "ひんし", "target": "Fainted" }
 ]
