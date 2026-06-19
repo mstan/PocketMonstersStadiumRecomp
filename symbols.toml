@@ -1303,7 +1303,7 @@ functions = [
     { name = "FUN_800529a0", vram = 0x800529a0, size = 0x228 },
     { name = "FUN_80052bd0", vram = 0x80052bd0, size = 0x58 },
     { name = "FUN_80052c30", vram = 0x80052c30, size = 0x8c },
-    { name = "FUN_80052cc0", vram = 0x80052cc0, size = 0xac },
+    { name = "__osSiRawStartDma", vram = 0x80052cc0, size = 0xac },
     { name = "FUN_80052d70", vram = 0x80052d70, size = 0x4c },
     { name = "FUN_80052dc0", vram = 0x80052dc0, size = 0x70 },
     { name = "FUN_80052e30", vram = 0x80052e30, size = 0x50 },
