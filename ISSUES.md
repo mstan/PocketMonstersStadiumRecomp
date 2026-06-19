@@ -33,6 +33,8 @@ encountered during stability testing get localized opportunistically.
 4. **#4** Translation language-override settings (Off / Original / English / …).
 5. **#5** PRESS START background image never renders.
 6. **#6** Translation coverage + polish (paused; see README/handoff).
+7. **#7** UI image transparency — buttons (A/B/L/R/S icons) and the hand
+   pointer render with opaque white borders instead of transparent.
 
 Issue numbers are stable IDs, not strictly the work order.
 
@@ -187,7 +189,8 @@ screenshots: title-screen background resource load (resource-server
 PRESJPEG path in FINDINGS BOOT-003), a fragment/overlay that holds the
 title art (could overlap #1), or an RT64 compositing/layer issue.
 
-*Status.* Not yet root-caused; needs a live run + screenshot.
+*Status.* Not yet root-caused; needs a live run + screenshot. Re-confirmed
+still missing by the user 2026-06-18.
 
 ---
 
@@ -201,6 +204,29 @@ nickname localization quality. Method: `PMS_TEXTPROBE=1` capture →
 `tools/pms_build_translations.py` decode/todo/build → author into
 `tools/key_en.tsv`. Paused in favor of stability; new strings hit during
 testing get localized opportunistically.
+
+---
+
+## #7 — UI image transparency (buttons / hand pointer) — **OPEN (render)**
+
+*Symptom (user-confirmed 2026-06-18).* The on-screen button icons (the
+A / B / L / R / S prompt badges) and the **hand pointer** cursor render
+with **opaque white borders** instead of transparent edges — the sprite's
+transparent surround shows as a white box around the art.
+
+*Likely cause (to verify).* A texture-format / alpha path issue: these are
+small 2D HUD sprites, probably CI (palette) or IA/I textures where the
+transparent index / alpha is not being honored (rendered opaque white).
+Could be the TLUT/format the game sets, the combiner/render-mode, or an
+RT64 decode/blend path. Render-domain (RT64 is fair game — not gated).
+
+*Method.* Screenshot the menu (hand pointer) + a battle/lead-select
+(A/B/L/R badges). Inspect the texture load (format/TLUT) for those sprites
+via RT64's texture/CIMG logging; compare against a correctly-transparent
+sprite. Same family as the long-standing "pointer-hand transparency"
+note in project memory.
+
+*Status.* Characterized + screenshotted; not yet root-caused.
 
 ---
 
