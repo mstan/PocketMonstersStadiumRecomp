@@ -947,13 +947,34 @@ extern "C" void pkmnstadium_stringdump(void) {
 // KV store = translations.json next to the exe; hot-reloaded on mtime change.
 // Keyed by FNV-1a64 of the raw source bytes (robust to RDRAM buffer reuse).
 namespace {
-std::unordered_map<uint64_t, std::string> g_xlate;     // hash(src) -> english
+// Per-entry translation value. orig_w = the Japanese footprint in GLYPH units
+// (max line; computed by tools/pms_build_translations and embedded as "orig_w"
+// — documentation + the default fit budget). fit_w = optional override ("fit_w"
+// in the JSON): when >=0 the English is condensed to fit_w*slot_adv px instead
+// of the Japanese footprint, so an entry can use more (or less) space than the
+// original when there is room. -1 means "match Japanese" (the default).
+struct XlateVal { std::string en; int orig_w = -1; int fit_w = -1; };
+std::unordered_map<uint64_t, XlateVal> g_xlate;        // hash(src) -> value
 std::mutex g_xlate_mtx;
 std::atomic<bool> g_xlate_armed{false};                // lock-free fast reject
 std::filesystem::file_time_type g_xlate_mtime{};
 bool g_xlate_ever_loaded = false;
 std::atomic<uint64_t> g_xlate_calls{0};
 std::atomic<uint64_t> g_xlate_hits{0};
+
+// Reentrancy guard. self_render_static draws via the recompiled glyph routines
+// (FUN_8001a3e4 / FUN_80019f70), which carry TRACE_ENTRY() and thus re-enter
+// this translation hook on the SAME thread. Those routines have coord-like args
+// and are themselves registered text PCs, so without this guard the reentry
+// would recurse back into self_render_static — infinite recursion plus a
+// non-recursive-mutex re-lock (calibrate_slot) that throws std::system_error.
+// When set, the hook is a no-op so the glyph routines run normally.
+thread_local bool g_xlate_active = false;
+struct XlateActiveGuard {
+    bool prev;
+    XlateActiveGuard() : prev(g_xlate_active) { g_xlate_active = true; }
+    ~XlateActiveGuard() { g_xlate_active = prev; }
+};
 
 int hexval(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -988,9 +1009,28 @@ std::string json_read_string(const std::string& s, size_t& i) {
     return out;
 }
 
-// Minimal tolerant scan: for each "src_hex":"..." find the next "target":"..."
-// and map FNV(src bytes) -> target. Schema (hot-reloadable):
-//   [ { "src_hex":"a5d7a5aa", "target":"Hello", "note":"..." }, ... ]
+// Read an optional integer field "<key>": <int> within [start,end). Returns
+// def if absent/unparseable. Tolerant (whitespace after the colon).
+int json_read_int(const std::string& s, const char* key, size_t start, size_t end, int def) {
+    std::string k = std::string("\"") + key + "\"";
+    size_t p = s.find(k, start);
+    if (p == std::string::npos || p >= end) return def;
+    p = s.find(':', p + k.size());
+    if (p == std::string::npos || p >= end) return def;
+    ++p;
+    while (p < end && (s[p] == ' ' || s[p] == '\t')) ++p;
+    bool neg = (p < end && s[p] == '-'); if (neg) ++p;
+    if (p >= end || s[p] < '0' || s[p] > '9') return def;
+    long v = 0; bool any = false;
+    while (p < end && s[p] >= '0' && s[p] <= '9') { v = v * 10 + (s[p] - '0'); ++p; any = true; }
+    if (!any) return def;
+    return neg ? (int)-v : (int)v;
+}
+
+// Minimal tolerant scan: for each entry (bounded by the next "src_hex") read
+// "target", plus optional integer fields "orig_w" / "fit_w". Schema
+// (hot-reloadable): [ { "src_hex":"a5d7a5aa", "target":"Hello",
+//                       "orig_w":4, "fit_w":8, "note":"..." }, ... ]
 void load_translations_locked() {
     g_xlate.clear();
     const std::string path = pms::app_file("translations.json").string();
@@ -1003,9 +1043,12 @@ void load_translations_locked() {
     size_t i = 0;
     const std::string SRC = "\"src_hex\"";
     while ((i = data.find(SRC, i)) != std::string::npos) {
+        // Bound this entry by the next src_hex so per-entry fields don't bleed.
+        size_t entry_end = data.find(SRC, i + SRC.size());
+        if (entry_end == std::string::npos) entry_end = data.size();
         i += SRC.size();
         size_t q = data.find('"', i);
-        if (q == std::string::npos) break;
+        if (q == std::string::npos || q >= entry_end) { i = entry_end; continue; }
         std::string hex = json_read_string(data, q);
         // bytes from hex
         std::vector<uint8_t> bytes;
@@ -1015,15 +1058,23 @@ void load_translations_locked() {
             bytes.push_back((uint8_t)((hi << 4) | lo));
         }
         size_t t = data.find("\"target\"", q);
-        if (t == std::string::npos) break;
-        t = data.find('"', t + 8);
-        std::string target = (t == std::string::npos) ? std::string() : json_read_string(data, t);
-        i = (t == std::string::npos) ? q : t;
+        std::string target;
+        if (t != std::string::npos && t < entry_end) {
+            t = data.find('"', t + 8);
+            if (t != std::string::npos) target = json_read_string(data, t);
+        }
+        const int orig_w = json_read_int(data, "orig_w", q, entry_end, -1);
+        const int fit_w  = json_read_int(data, "fit_w",  q, entry_end, -1);
+        i = entry_end;
         if (!bytes.empty() && !target.empty()) {
-            g_xlate[pms_fnv1a(bytes.data(), (uint32_t)bytes.size())] = target;
+            g_xlate[pms_fnv1a(bytes.data(), (uint32_t)bytes.size())] =
+                XlateVal{ std::move(target), orig_w, fit_w };
         }
     }
     g_xlate_armed.store(!g_xlate.empty(), std::memory_order_relaxed);
+    // Seed the chokepoints so general coverage works in normal play (not only
+    // during a capture): the universal formatter AND the primary string-draw.
+    textpc_add(kStringDrawPC);
     // Seed the universal formatter chokepoint so general coverage (battle/
     // overlay text built via _Printf) works in normal play, not only during a
     // PMS_TEXTPROBE capture (which is what otherwise populates the set).
@@ -1206,9 +1257,14 @@ void xlate_discovery(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
 // x=r4, y=r5, str=r6, so giving them the fit-aware renderer stops English from
 // spilling past where the Japanese did. `scratch` is caller-provided guest
 // stack space. Returns true on success.
+// budget_glyphs: when >=0, condense each English line to budget_glyphs*slot_adv
+// px (the "fit_w" override — lets an entry use more/less than the JP footprint).
+// When -1, fit to the per-line Japanese footprint computed from `src` (default).
 bool self_render_static(unsigned char* rdram, recomp_context* ctx,
                         const uint8_t* src, uint32_t len, const std::string& eng,
-                        uint32_t scratch) {
+                        uint32_t scratch, int budget_glyphs = -1) {
+    // Block the translation hook for the recompiled glyph routines we call below.
+    XlateActiveGuard _reentry_guard;
     const uint32_t st = pms_diag_read_u32(rdram, 0x800AD200u);
     uint8_t line_h = 16, slot = 0, slot_adv = 12;
     if (pms_diag_rdram_range(st, 0x40)) {
@@ -1254,23 +1310,35 @@ bool self_render_static(unsigned char* rdram, recomp_context* ctx,
             if (en_line < kMaxLines) en_w[en_line] += adv_for(c);
         }
         const int en_count = en_line + 1;
-        int jp_w[kMaxLines] = {0}; int jp_line = 0;
-        for (uint32_t i = 0; i < len; ) {
-            uint8_t c = src[i];
-            if (c == 0x0A) { if (jp_line < kMaxLines - 1) ++jp_line; ++i; continue; }
-            i += (c >= 0x80) ? 2u : 1u;            // 2-byte JIS vs 1-byte glyph
-            if (jp_line < kMaxLines) jp_w[jp_line] += (int)slot_adv;
-        }
-        const int jp_count = jp_line + 1;
-        if (en_count == jp_count) {
-            for (int l = 0; l < en_count && l < kMaxLines; ++l)
-                if (en_w[l] > jp_w[l] && en_w[l] > 0)
-                    line_scale[l] = (float)jp_w[l] / (float)en_w[l];
+        if (budget_glyphs >= 0) {
+            // Explicit override: condense each English line to the same budget
+            // (budget_glyphs * slot_adv px). budget_glyphs==0 disables condensing.
+            const int bud = budget_glyphs * (int)slot_adv;
+            if (bud > 0) {
+                for (int l = 0; l < en_count && l < kMaxLines; ++l)
+                    if (en_w[l] > bud && en_w[l] > 0)
+                        line_scale[l] = (float)bud / (float)en_w[l];
+            }
         } else {
-            int et = 0, jt = 0;
-            for (int l = 0; l < kMaxLines; ++l) { et += en_w[l]; jt += jp_w[l]; }
-            const float s = (et > jt && et > 0) ? (float)jt / (float)et : 1.0f;
-            for (int l = 0; l < kMaxLines; ++l) line_scale[l] = s;
+            // Default: fit to the per-line Japanese footprint (match JP width).
+            int jp_w[kMaxLines] = {0}; int jp_line = 0;
+            for (uint32_t i = 0; i < len; ) {
+                uint8_t c = src[i];
+                if (c == 0x0A) { if (jp_line < kMaxLines - 1) ++jp_line; ++i; continue; }
+                i += (c >= 0x80) ? 2u : 1u;            // 2-byte JIS vs 1-byte glyph
+                if (jp_line < kMaxLines) jp_w[jp_line] += (int)slot_adv;
+            }
+            const int jp_count = jp_line + 1;
+            if (en_count == jp_count) {
+                for (int l = 0; l < en_count && l < kMaxLines; ++l)
+                    if (en_w[l] > jp_w[l] && en_w[l] > 0)
+                        line_scale[l] = (float)jp_w[l] / (float)en_w[l];
+            } else {
+                int et = 0, jt = 0;
+                for (int l = 0; l < kMaxLines; ++l) { et += en_w[l]; jt += jp_w[l]; }
+                const float s = (et > jt && et > 0) ? (float)jt / (float)et : 1.0f;
+                for (int l = 0; l < kMaxLines; ++l) line_scale[l] = s;
+            }
         }
     }
 
@@ -1314,23 +1382,34 @@ void xlate_general(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
     uint16_t len = 0;
     if (!read_text_arg(rdram, (uint32_t)ctx->r6, src, &len)) return;
     const uint64_t key = pms_fnv1a(src, len);
-    std::string eng;
+    XlateVal v;
     {
         std::lock_guard<std::mutex> lk(g_xlate_mtx);
         auto it = g_xlate.find(key);
         if (it == g_xlate.end()) return;
-        eng = it->second;
+        v = it->second;
     }
     const uint32_t sp = (uint32_t)ctx->r29;
     if (sp < 0x80000C00u) return;                  // need stack headroom
     const uint32_t scratch = (sp - 0x800u) & ~7u;  // per-call -> reentrancy-safe
-    if (eng.size() > 0x300u) return;
+    if (v.en.size() > 0x300u) return;
+
+    // Coordinate-based text drawers (x=r4, y=r5 look like screen coords) share
+    // kStringDrawPC's (x=r4,y=r5,str=r6) convention, so give them the SAME
+    // fit-aware self-renderer — this is what stops sibling-drawn menu items
+    // (e.g. PC 0x8A100808: View Data / Distribution) from spilling offscreen.
+    // Routines where r4/r5 are NOT coords (e.g. _Printf: r4=writeproc) and
+    // %-templates keep the fmt-swap path (dynamic args / other use of r6 intact).
+    // budget = fit_w override when set, else -1 = match the JP footprint.
+    const bool coords = ((uint32_t)ctx->r4 < 0x1000u && (uint32_t)ctx->r5 < 0x1000u);
+    if (coords && v.en.find('%') == std::string::npos) {
+        if (self_render_static(rdram, ctx, src, len, v.en, scratch, v.fit_w))
+            g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     // fmt-swap: repoint r6 at the English replacement and let the ORIGINAL
-    // routine render it. (Self-rendering these here -- calling the glyph drawer
-    // and suppressing the original via an empty r6 -- destabilized class-1
-    // routines that use r6 for more than the draw, so auto-fit for them is
-    // pursued separately; see notes. kStringDrawPC keeps its self-render fit.)
-    if (!write_guest_str(rdram, scratch, eng)) return;
+    // routine render it.
+    if (!write_guest_str(rdram, scratch, v.en)) return;
     ctx->r6 = scratch;
     g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
 }
@@ -1341,6 +1420,9 @@ void xlate_general(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
 // text-draw routine the census discovered. A cheap no-op for non-text functions.
 extern "C" void pkmnstadium_text_xlate(const char* name,
                                        unsigned char* rdram, void* ctxv) {
+    // Reentrant call from our own self_render_static glyph drawing — no-op so the
+    // recompiled glyph routines execute normally (prevents infinite recursion).
+    if (g_xlate_active) return;
     // Reload check (and first load) every 1024 fn entries — not per call.
     if ((g_xlate_calls.fetch_add(1, std::memory_order_relaxed) & 0x3FFu) == 0) {
         maybe_reload_translations();
@@ -1367,32 +1449,32 @@ extern "C" void pkmnstadium_text_xlate(const char* name,
     if (len == 0) return;
 
     const uint64_t key = pms_fnv1a(src, len);
-    std::string eng;
+    XlateVal v;
     {
         std::lock_guard<std::mutex> lk(g_xlate_mtx);
         auto it = g_xlate.find(key);
         if (it == g_xlate.end()) return;
-        eng = it->second;
+        v = it->second;
     }
     // Transient scratch on the caller's guest stack, well below any frame the
     // original + _Printf will use (~0x300). Per-call sp -> reentrancy-safe.
     const uint32_t sp = (uint32_t)ctx->r29;
     if (sp < 0x80000C00u) return; // not enough stack headroom for scratch
     const uint32_t scratch = (sp - 0x800u) & ~7u;
-    if (eng.size() > 0x300u) return;             // sanity cap
+    if (v.en.size() > 0x300u) return;             // sanity cap
 
     // %-format strings keep the original formatting path (dynamic args intact):
     // swap the fmt pointer and let the original _Printf + render run.
-    if (eng.find('%') != std::string::npos) {
-        if (!write_guest_str(rdram, scratch, eng)) return;
+    if (v.en.find('%') != std::string::npos) {
+        if (!write_guest_str(rdram, scratch, v.en)) return;
         ctx->r6 = scratch;
         g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
-    // Static strings: self-render with proportional spacing + per-line auto-fit
-    // (shared helper, also used by the class-1 sibling routines via xlate_general).
-    if (self_render_static(rdram, ctx, src, len, eng, scratch))
+    // Static strings: self-render with proportional spacing + auto-fit. budget =
+    // fit_w override when set, else -1 = match the per-line Japanese footprint.
+    if (self_render_static(rdram, ctx, src, len, v.en, scratch, v.fit_w))
         g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
 }
 
