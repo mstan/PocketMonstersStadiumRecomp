@@ -5,8 +5,10 @@
 ::   1. Provisions lib/N64ModernRuntime and lib/rt64 as junctions to the
 ::      sister checkouts (..\N64ModernRuntime, ..\rt64) if present, else
 ::      clones them from mstan/* at the branch in n64recomp.pin.
-::   2. Initializes N64ModernRuntime's N64Recomp submodule (the engine).
-::   3. Reminds you to drop the verified PMS-J ROM in as baserom.z64.
+::   2. Junctions the RmlUi-launcher UI libs (RmlUi/lunasvg/freetype/...) from
+::      ..\Zelda64Recomp\lib (version-matched to the fork lineage).
+::   3. Initializes N64ModernRuntime's N64Recomp submodule (the engine).
+::   4. Reminds you to drop the verified PMS-J ROM in as baserom.z64.
 ::
 :: lib/ is .gitignored; the SHAs each fork is known to boot against are
 :: recorded in n64recomp.pin.
@@ -18,6 +20,9 @@ set "RT64_REPO=https://github.com/mstan/rt64.git"
 set "BRANCH=main"
 set "SISTER_N64MR=..\N64ModernRuntime"
 set "SISTER_RT64=..\rt64"
+:: UI libs (RmlUi launcher) are version-matched to the rt64/N64MR fork lineage
+:: (Zelda64Recomp@ab677e7) and live inside Zelda64Recomp/lib; junction them in.
+set "SISTER_ZELDA_LIB=..\Zelda64Recomp\lib"
 
 if not exist "lib" mkdir "lib"
 
@@ -40,6 +45,22 @@ if not exist "lib\rt64" (
     ) else (
         echo Cloning rt64...
         git clone --branch %BRANCH% %RT64_REPO% "lib\rt64"
+    )
+)
+
+:: ---- Provision UI libs for the RmlUi launcher (junction to Zelda64Recomp/lib) ----
+:: RmlUi/lunasvg/freetype/GamepadMotionHelpers/SlotMap/concurrentqueue are not
+:: standalone forks; they ship inside Zelda64Recomp/lib. nfd comes from rt64's
+:: contrib. FindFreetype.cmake is tracked under cmake/ (lib/ is gitignored).
+for %%n in (RmlUi lunasvg freetype-windows-binaries GamepadMotionHelpers SlotMap concurrentqueue) do (
+    if not exist "lib\%%n" (
+        if exist "%SISTER_ZELDA_LIB%\%%n" (
+            echo Junctioning lib\%%n -^> %SISTER_ZELDA_LIB%\%%n
+            mklink /J "lib\%%n" "%SISTER_ZELDA_LIB%\%%n" >nul
+        ) else (
+            echo WARNING: %SISTER_ZELDA_LIB%\%%n not found.
+            echo          Clone Zelda64Recomp next to this repo for the launcher build.
+        )
     )
 )
 

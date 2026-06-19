@@ -40,6 +40,13 @@ endif()
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
+# The bundled static FreeType is located via cmake/FindFreetype.cmake; put cmake/
+# on the module path so both RmlUi's build and our find_package(Freetype) resolve
+# to it (lib/ itself is gitignored, so the finder is tracked under cmake/).
+if (WIN32)
+    set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
+endif()
+
 # Release/windowed build: no console window. Off by default (console is handy
 # for dev — the boot log goes to stderr). Configure -DPMS_NO_CONSOLE=ON to ship.
 option(PMS_NO_CONSOLE "Build a windowed release with no console window" OFF)
@@ -60,6 +67,17 @@ set(RT64_STATIC TRUE)
 set(RT64_SDL_WINDOW_VULKAN TRUE)
 add_compile_definitions(HLSL_CPU)
 add_subdirectory(${CMAKE_SOURCE_DIR}/lib/rt64 ${CMAKE_BINARY_DIR}/rt64)
+
+# ---- RmlUi + lunasvg (UI framework for the SS Anne launcher) ----------------
+# Vendored forks under lib/ (version-matched to the rt64/N64MR fork lineage,
+# Zelda64Recomp@ab677e7). lunasvg first so RmlUi's SVG plugin links it statically.
+set(BUILD_SHARED_LIBS OFF)
+set(LUNASVG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_SOURCE_DIR}/lib/lunasvg)
+set(RMLUI_SVG_PLUGIN ON CACHE BOOL "" FORCE)
+set(RMLUI_TESTS_ENABLED OFF CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_SOURCE_DIR}/lib/RmlUi)
+target_compile_definitions(rmlui_core PRIVATE LUNASVG_BUILD_STATIC)
 
 # ---- N64ModernRuntime (junctioned at lib/N64ModernRuntime) -----------------
 # Transitively adds N64Recomp (+ ares-bridge placeholder) and ultramodern.
@@ -97,6 +115,15 @@ add_executable(PocketMonstersStadiumRecomp
     ${CMAKE_SOURCE_DIR}/rsp/aspMain.cpp
     # Standard libultra JPEG ucode, shared with Pokemon Stadium US.
     ${CMAKE_SOURCE_DIR}/rsp/njpgdspMain.cpp
+
+    # ---- SS Anne RmlUi launcher + emulated Transfer Pak -------------------
+    # The launcher uses plain launcher.rml driven by ui_seam.cpp, rendered by
+    # the game-agnostic recompui RT64 backend (ui_renderer.cpp) + RmlUi's SDL
+    # platform backend. transfer_pak.cpp emulates the N64 Transfer Pak bus.
+    src/main/ui_seam.cpp
+    src/main/transfer_pak.cpp
+    ${CMAKE_SOURCE_DIR}/src/ui/ui_renderer.cpp
+    ${CMAKE_SOURCE_DIR}/lib/RmlUi/Backends/RmlUi_Platform_SDL.cpp
 )
 
 target_include_directories(PocketMonstersStadiumRecomp PRIVATE
@@ -111,8 +138,20 @@ target_include_directories(PocketMonstersStadiumRecomp PRIVATE
     ${CMAKE_SOURCE_DIR}/lib/rt64/src
     ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib
     ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib/hlslpp/include
+    ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib/dxc/inc
     ${CMAKE_SOURCE_DIR}/lib/rt64/src/rhi
     ${CMAKE_SOURCE_DIR}/lib/rt64/src/render
+    # ---- SS Anne UI (RmlUi) include paths ----------------------------------
+    ${CMAKE_SOURCE_DIR}/src/ui
+    ${CMAKE_SOURCE_DIR}/src/ui/core
+    ${CMAKE_SOURCE_DIR}/src/ui/util
+    ${CMAKE_SOURCE_DIR}/lib/RmlUi/Include
+    ${CMAKE_SOURCE_DIR}/lib/RmlUi/Backends
+    ${CMAKE_SOURCE_DIR}/lib/GamepadMotionHelpers
+    ${CMAKE_SOURCE_DIR}/lib/freetype-windows-binaries/include
+    ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib/nativefiledialog-extended/src/include
+    # Generated Interface{VS,PS} shader headers land here.
+    ${CMAKE_BINARY_DIR}/shaders
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
@@ -175,10 +214,48 @@ target_link_libraries(PocketMonstersStadiumRecomp PRIVATE
     ultramodern
     rt64
     ares_bridge
+    # ---- SS Anne UI (RmlUi) ------------------------------------------------
+    RmlUi::Core
+    RmlUi::Debugger
+    lunasvg
+    nfd
 )
+
+# ---- FreeType (RmlUi font engine; bundled static, via cmake/FindFreetype) ---
+find_package(Freetype REQUIRED)
+target_include_directories(PocketMonstersStadiumRecomp PRIVATE ${FREETYPE_INCLUDE_DIRS})
+target_link_libraries(PocketMonstersStadiumRecomp PRIVATE ${FREETYPE_LIBRARIES})
 
 # Windowed (no-console) release. SDL2main supplies WinMain for the WINDOWS
 # subsystem, which calls our SDL_main, so no /ENTRY override is needed.
 if (WIN32 AND PMS_NO_CONSOLE)
     target_link_options(PocketMonstersStadiumRecomp PRIVATE /SUBSYSTEM:WINDOWS)
 endif()
+
+# ---- Interface shader compilation (RmlUi overlay) --------------------------
+# build_vertex_shader / build_pixel_shader come from lib/rt64's CMakeLists and
+# need the DXC option vars + DXC path set in this scope (rt64's own CMake does
+# not export them). Produces ${CMAKE_BINARY_DIR}/shaders/Interface{VS,PS}.hlsl.
+# spirv.h, included by src/ui/ui_renderer.cpp.
+set(DXC_COMMON_OPTS "-I${PROJECT_SOURCE_DIR}/src")
+set(DXC_DXIL_OPTS "-Wno-ignored-attributes")
+set(DXC_SPV_OPTS "-spirv" "-fspv-target-env=vulkan1.0" "-fvk-use-dx-layout")
+set(DXC_PS_OPTS "${DXC_COMMON_OPTS}" "-E" "PSMain" "-T ps_6_0" "-D DYNAMIC_RENDER_PARAMS")
+set(DXC_VS_OPTS "${DXC_COMMON_OPTS}" "-E" "VSMain" "-T vs_6_0" "-D DYNAMIC_RENDER_PARAMS" "-fvk-invert-y")
+if (WIN32)
+    set(DXC "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/x64/dxc.exe")
+elseif (APPLE)
+    set(DXC "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/lib/arm64" "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/arm64/dxc-macos")
+else()
+    set(DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/x64/dxc-linux")
+endif()
+
+build_vertex_shader(PocketMonstersStadiumRecomp "shaders/InterfaceVS.hlsl" "shaders/InterfaceVS.hlsl")
+build_pixel_shader(PocketMonstersStadiumRecomp "shaders/InterfacePS.hlsl" "shaders/InterfacePS.hlsl")
+
+# ---- UI assets (launcher.rml, rcss, fonts, cart art) next to the exe --------
+add_custom_command(TARGET PocketMonstersStadiumRecomp POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/assets"
+        "$<TARGET_FILE_DIR:PocketMonstersStadiumRecomp>/assets"
+)

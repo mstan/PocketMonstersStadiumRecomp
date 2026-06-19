@@ -51,6 +51,8 @@
 
 #include "app_paths.h"
 #include "debug_server.h"
+#include "ui_seam.h"       // SS Anne RmlUi launcher (in-app first screen)
+#include "transfer_pak.h"  // emulated N64 Transfer Pak (GB cart bus)
 
 namespace pms {
 // Defined here (where <windows.h> is included with WIN32_LEAN_AND_MEAN /
@@ -353,6 +355,11 @@ static void reset_audio(uint32_t output_freq) {
 
 static SDL_Window* g_window = nullptr;
 
+// Non-static alias to the SDL window, consumed by the SS Anne UI overlay
+// (src/main/ui_seam.cpp), which references a global `SDL_Window* window`.
+// Assigned in create_window().
+SDL_Window* window = nullptr;
+
 static ultramodern::gfx_callbacks_t::gfx_data_t create_gfx() {
     fprintf(stderr, "[PMS] create_gfx: SDL_InitSubSystem(VIDEO)\n"); fflush(stderr);
     SDL_InitSubSystem(SDL_INIT_VIDEO);
@@ -371,6 +378,7 @@ static ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callba
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         std::exit(EXIT_FAILURE);
     }
+    window = g_window;  // alias consumed by the SS Anne launcher overlay
     SDL_ShowWindow(g_window);
 
     SDL_SysWMinfo wmInfo;
@@ -391,6 +399,19 @@ static std::atomic<bool> s_turbo_persistent{false};
 
 static void update_gfx(void*) {
     pms::dbg::g_frame_count.fetch_add(1);
+    // Open all game controllers once while the launcher is up so SDL delivers
+    // their events for menu navigation (the game otherwise opens pads at boot).
+    if (pkmnstadium::ui_seam::launcher_visible()) {
+        static bool s_launcher_pads_opened = false;
+        if (!s_launcher_pads_opened) {
+            s_launcher_pads_opened = true;
+            SDL_GameControllerUpdate();
+            const int njoy = SDL_NumJoysticks();
+            for (int i = 0; i < njoy; ++i) {
+                if (SDL_IsGameController(i)) SDL_GameControllerOpen(i);
+            }
+        }
+    }
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
         if (ev.type == SDL_QUIT) {
@@ -403,6 +424,12 @@ static void update_gfx(void*) {
             std::fflush(stderr);
             std::_Exit(0);
         }
+        // While the SS Anne launcher is the active first screen, route input to
+        // it (mouse/keyboard/pad for clicking PLAY, toggles, the cart pickers).
+        if (pkmnstadium::ui_seam::launcher_visible()) {
+            pkmnstadium::ui_seam::queue_event(ev);
+            continue;
+        }
         if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_TAB && ev.key.repeat == 0) {
             pms::dbg::g_fast_forward.store(true);
         } else if (ev.type == SDL_KEYUP && ev.key.keysym.sym == SDLK_TAB) {
@@ -411,11 +438,55 @@ static void update_gfx(void*) {
     }
 }
 
-// ---- Input (SDL GameController + keyboard; port 0 only) --------------------
-// No stub: with no controller connected, port 0 still feeds keyboard input, and
-// reads return real idle input. Ports 1-3 report absent (no Transfer Pak yet).
+// ---- Input (SDL GameController + keyboard) ---------------------------------
+// No stub: with no controller connected, an active port still feeds keyboard
+// input and reads return real idle input.
+//
+// Per-port routing: once the SS Anne launcher commits its config at PLAY, each
+// N64 port (0..3 == Player 1..4) is routed to a specific device. Until then (or
+// under PMS_AUTOBOOT) the legacy single-human model applies: port 0 = keyboard +
+// first pad, ports 1-3 present only when a Transfer Pak cart is configured.
 
 static SDL_GameController* g_pad = nullptr;
+
+static std::atomic<bool> g_launcher_input_active{false};
+static pkmnstadium::ui_seam::DeviceKind g_port_kind[4] = {};
+static int g_port_instance[4] = {-1, -1, -1, -1};
+static bool g_port_enabled[4] = {false, false, false, false};
+static SDL_GameController* g_port_pad[4] = {nullptr, nullptr, nullptr, nullptr};
+
+// Snapshot the launcher's assignment into the per-port routing tables. Called
+// once from the boot thread when PLAY is clicked. SDL handles are opened lazily
+// in poll_inputs (on the gfx thread that owns the subsystem).
+static void apply_launcher_input_config() {
+    for (int port = 0; port < 4; ++port) {
+        const auto pa = pkmnstadium::ui_seam::port_assignment(port);
+        g_port_enabled[port] = pa.enabled;
+        g_port_kind[port] = pa.enabled ? pa.kind : pkmnstadium::ui_seam::DeviceKind::None;
+        g_port_instance[port] = pa.gamepad_instance;
+    }
+    g_launcher_input_active.store(true);
+    std::fprintf(stderr, "[input] launcher config applied: "
+                 "P1=%d P2=%d P3=%d P4=%d (0=None 1=Kbd 2=Pad)\n",
+                 (int)g_port_kind[0], (int)g_port_kind[1],
+                 (int)g_port_kind[2], (int)g_port_kind[3]);
+    std::fflush(stderr);
+}
+
+// Open the SDL gamepad with the given instance id (find its device index).
+// Reuses an already-open handle (e.g. one opened for launcher navigation).
+static SDL_GameController* open_pad_by_instance(int instance) {
+    if (SDL_GameController* existing = SDL_GameControllerFromInstanceID(instance)) {
+        return existing;
+    }
+    const int njoy = SDL_NumJoysticks();
+    for (int i = 0; i < njoy; ++i) {
+        if (SDL_IsGameController(i) && SDL_JoystickGetDeviceInstanceID(i) == instance) {
+            return SDL_GameControllerOpen(i);
+        }
+    }
+    return nullptr;
+}
 
 static void ensure_pad_open() {
     if (g_pad) return;
@@ -440,7 +511,17 @@ static void ensure_pad_open() {
 
 static void poll_inputs() {
     SDL_GameControllerUpdate();
-    ensure_pad_open();
+    if (g_launcher_input_active.load()) {
+        // Lazily open each port's assigned gamepad (on this gfx thread).
+        for (int port = 0; port < 4; ++port) {
+            if (g_port_kind[port] == pkmnstadium::ui_seam::DeviceKind::Gamepad &&
+                g_port_pad[port] == nullptr && g_port_instance[port] >= 0) {
+                g_port_pad[port] = open_pad_by_instance(g_port_instance[port]);
+            }
+        }
+    } else {
+        ensure_pad_open();
+    }
 }
 
 static bool get_n64_input(int controller_num, uint16_t* buttons_out, float* x_out, float* y_out) {
@@ -448,14 +529,43 @@ static bool get_n64_input(int controller_num, uint16_t* buttons_out, float* x_ou
     *x_out = 0.0f;
     *y_out = 0.0f;
 
-    if (controller_num != 0) {
-        return false;  // ports 1-3 absent (no Transfer Pak yet)
+    // Pick the device driving this N64 port. In launcher mode each port is
+    // routed explicitly by the SS Anne config; otherwise the legacy single-human
+    // model applies (port 0 = keyboard + first pad, ports 1-3 = Transfer-Pak idle).
+    SDL_GameController* pad = nullptr;
+    bool use_kb = false;
+    bool primary_port = false;  // the port that receives the TCP debug override
+    if (g_launcher_input_active.load()) {
+        if (controller_num < 0 || controller_num > 3 || !g_port_enabled[controller_num]) {
+            return false;  // disabled / out-of-range slot: absent
+        }
+        switch (g_port_kind[controller_num]) {
+            case pkmnstadium::ui_seam::DeviceKind::Gamepad:
+                pad = g_port_pad[controller_num];
+                break;
+            case pkmnstadium::ui_seam::DeviceKind::Keyboard:
+                use_kb = true;
+                break;
+            default:
+                // No controller assigned: respond idle iff a Transfer Pak cart is
+                // present, so the game still sees the pak on that port.
+                return pkmnstadium::transfer_pak::has_transfer_pak(controller_num);
+        }
+        primary_port = (controller_num == 0);
+    } else {
+        if (controller_num != 0) {
+            return pkmnstadium::transfer_pak::has_transfer_pak(controller_num);
+        }
+        pad = g_pad;
+        use_kb = true;
+        primary_port = true;
     }
 
+    // TCP override (debug harness) layers only onto the primary port.
     uint16_t override_buttons = 0;
     float override_x = 0.0f;
     float override_y = 0.0f;
-    if (pms::dbg::g_input_override_active.load()) {
+    if (primary_port && pms::dbg::g_input_override_active.load()) {
         override_buttons = pms::dbg::g_buttons_override.load();
         override_x = float(pms::dbg::g_stick_x_override.load());
         override_y = float(pms::dbg::g_stick_y_override.load());
@@ -464,9 +574,9 @@ static bool get_n64_input(int controller_num, uint16_t* buttons_out, float* x_ou
     uint16_t b = 0;
     int16_t lx = 0, ly = 0, rx = 0, ry = 0;
 
-    if (g_pad) {
+    if (pad) {
         auto pressed = [&](SDL_GameControllerButton btn) {
-            return SDL_GameControllerGetButton(g_pad, btn) ? 1 : 0;
+            return SDL_GameControllerGetButton(pad, btn) ? 1 : 0;
         };
         // N64 button bit layout (libultra contStat):
         //   0x8000 A   0x4000 B   0x2000 Z   0x1000 Start
@@ -484,14 +594,15 @@ static bool get_n64_input(int controller_num, uint16_t* buttons_out, float* x_ou
         if (pressed(SDL_CONTROLLER_BUTTON_LEFTSTICK))     b |= 0x0020;
         if (pressed(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) b |= 0x0010;
 
-        rx = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_RIGHTX);
-        ry = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_RIGHTY);
-        lx = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTX);
-        ly = SDL_GameControllerGetAxis(g_pad, SDL_CONTROLLER_AXIS_LEFTY);
+        rx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX);
+        ry = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
+        lx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
+        ly = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
     }
 
-    // Keyboard fallback / supplement (Project64/Mupen-style layout).
-    const Uint8* ks = SDL_GetKeyboardState(nullptr);
+    // Keyboard fallback / supplement (Project64/Mupen-style layout). Only when
+    // this port is keyboard-driven (legacy port 0, or a Keyboard-assigned slot).
+    const Uint8* ks = use_kb ? SDL_GetKeyboardState(nullptr) : nullptr;
     if (ks != nullptr) {
         if (ks[SDL_SCANCODE_X])      b |= 0x8000;  // A
         if (ks[SDL_SCANCODE_Z])      b |= 0x4000;  // B
@@ -555,21 +666,51 @@ static bool get_n64_input(int controller_num, uint16_t* buttons_out, float* x_ou
 }
 
 static void set_rumble(int controller_num, bool on) {
-    if (controller_num == 0 && g_pad) {
-        SDL_GameControllerRumble(g_pad, on ? 0xFFFF : 0, on ? 0xFFFF : 0, 1000);
+    SDL_GameController* pad = nullptr;
+    if (g_launcher_input_active.load()) {
+        if (controller_num >= 0 && controller_num < 4) pad = g_port_pad[controller_num];
+    } else if (controller_num == 0) {
+        pad = g_pad;
     }
+    if (!pad) return;
+    SDL_GameControllerRumble(pad, on ? 0xFFFF : 0, on ? 0xFFFF : 0, 1000);
 }
 
 static ultramodern::input::connected_device_info_t get_connected_device_info(int controller_num) {
+    const bool has_transfer_pak = pkmnstadium::transfer_pak::has_transfer_pak(controller_num);
     ultramodern::input::connected_device_info_t info{};
-    if (controller_num == 0) {
-        ensure_pad_open();  // osContInit queries before the first poll
+
+    // Launcher mode: a port is present iff its slot is enabled AND it has either
+    // an assigned controller or a Transfer Pak cart. Disabled slots are absent,
+    // which is how the launcher suppresses unconfigured players.
+    if (g_launcher_input_active.load()) {
+        const bool enabled = (controller_num >= 0 && controller_num < 4) && g_port_enabled[controller_num];
+        const bool has_dev = enabled &&
+            (g_port_kind[controller_num] != pkmnstadium::ui_seam::DeviceKind::None || has_transfer_pak);
+        info.connected_device = has_dev
+            ? ultramodern::input::Device::Controller
+            : ultramodern::input::Device::None;
+        info.connected_pak = (enabled && has_transfer_pak)
+            ? ultramodern::input::Pak::RumblePak
+            : ultramodern::input::Pak::None;
+        return info;
     }
-    // Port 0 always present (keyboard/pad feed get_n64_input); ports 1-3 absent.
-    info.connected_device = (controller_num == 0)
+
+    // Legacy: libultra's osContInit() queries before the first poll, so lazy-
+    // detect the pad here too (else "Controller 1 not connected").
+    if (controller_num == 0) {
+        ensure_pad_open();
+    }
+    // Port 0 always present (keyboard/pad/TCP feed get_n64_input); ports 1-3
+    // present only when a Transfer Pak cart is configured. ultramodern's Pak enum
+    // has no first-class TransferPak, so RumblePak is the "pak present" stand-in
+    // (Stadium discriminates the real pak type over the bus in transfer_pak.cpp).
+    info.connected_device = (controller_num == 0 || has_transfer_pak)
         ? ultramodern::input::Device::Controller
         : ultramodern::input::Device::None;
-    info.connected_pak = ultramodern::input::Pak::None;
+    info.connected_pak = has_transfer_pak
+        ? ultramodern::input::Pak::RumblePak
+        : ultramodern::input::Pak::None;
     return info;
 }
 
@@ -767,6 +908,36 @@ int main(int argc, char** argv) {
     reset_audio(48000);
     std::fprintf(stderr, "[PMS] SDL audio/controller init + reset_audio OK\n"); std::fflush(stderr);
 
+    // Enumerate connected gamepads for the SS Anne launcher's controller
+    // dropdowns. Done here (before the render hooks initialize) so the list is
+    // ready when the launcher document loads.
+    {
+        SDL_GameControllerUpdate();
+        std::vector<std::pair<int, std::string>> pads;
+        const int njoy = SDL_NumJoysticks();
+        for (int i = 0; i < njoy; ++i) {
+            if (!SDL_IsGameController(i)) continue;
+            const char* nm = SDL_GameControllerNameForIndex(i);
+            pads.emplace_back(SDL_JoystickGetDeviceInstanceID(i),
+                              nm ? std::string(nm) : std::string("Controller"));
+        }
+        // Disambiguate identical controller names so the dropdown can tell them
+        // apart (assignment is by unique instance id; this only clarifies labels).
+        std::vector<std::string> orig;
+        orig.reserve(pads.size());
+        for (auto& p : pads) orig.push_back(p.second);
+        for (size_t i = 0; i < pads.size(); ++i) {
+            int total = 0, idx = 0;
+            for (size_t j = 0; j < pads.size(); ++j) {
+                if (orig[j] == orig[i]) { ++total; if (j <= i) idx = total; }
+            }
+            if (total > 1) pads[i].second = orig[i] + " #" + std::to_string(idx);
+        }
+        std::fprintf(stderr, "[PMS] %zu gamepad(s) detected for launcher\n", pads.size());
+        std::fflush(stderr);
+        pkmnstadium::ui_seam::set_gamepads(pads);
+    }
+
     recomp::Version project_version{0, 1, 0, ""};
     recomp::register_config_path(std::filesystem::current_path());
 
@@ -883,14 +1054,33 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Defer start_game so the VI thread installs its dummy mode before
-    // game_status flips to Running (update_vi reads next_state->mode
-    // unconditionally; without the grace window it dereferences a null mode).
-    std::thread([game_id = game.game_id]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // The SS Anne launcher is the first screen: the game stays unstarted while
+    // the launcher renders, and boots only when the user clicks PLAY. A dedicated
+    // thread waits for that signal, snapshots the launcher's controller config +
+    // loads the Transfer Pak config it committed, then calls start_game (kept off
+    // the render thread). The natural delay before a click also satisfies the
+    // VI-thread grace window (the dummy VI mode must be installed before
+    // game_status flips to Running, else update_vi derefs a null mode).
+    // PMS_AUTOBOOT=1 bypasses the launcher and boots immediately (dev/regression).
+    const bool autoboot = std::getenv("PMS_AUTOBOOT") != nullptr;
+    std::thread([game_id = game.game_id, autoboot]() {
+        if (autoboot) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::fprintf(stderr, "[PMS] PMS_AUTOBOOT=1 -> skipping launcher\n"); std::fflush(stderr);
+        } else {
+            while (!pkmnstadium::ui_seam::play_requested()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            }
+            apply_launcher_input_config();  // lock in controller/enabled routing
+        }
+        // Load the Transfer Pak config the launcher just wrote (launcher.cfg) /
+        // env overrides, before the game's first accessory probe.
+        pkmnstadium::transfer_pak::initialize();
         recomp::start_game(game_id);
         std::fprintf(stderr, "[PMS] start_game fired\n"); std::fflush(stderr);
     }).detach();
+    std::fprintf(stderr, "[PMS] launcher-first: waiting for PLAY (set PMS_AUTOBOOT=1 to skip)\n");
+    std::fflush(stderr);
 
     recomp::rsp::callbacks_t rsp_callbacks{
         .get_rsp_microcode = get_rsp_microcode,
