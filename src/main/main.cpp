@@ -144,6 +144,41 @@ static void log_rsp_task_signature(uint8_t* rdram, const OSTask* task) {
     log_rsp_words(rdram, "data", (uint32_t)task->t.data_ptr);
 }
 
+// #5 diag: the njpeg task's decode-output buffer (task struct w0), captured in
+// get_rsp_microcode so the wrapper below can inspect that exact address.
+static std::atomic<uint32_t> g_njpeg_out{0};
+
+// #5 diag: wraps njpgdspMain so we can confirm it actually EXECUTES and whether
+// it writes the decoded MCU to its RDRAM output buffer (before vs after). The
+// title background draws zeros (green) from this buffer, so the question is
+// whether the recompiled JPEG ucode produces output at all.
+static RspExitReason njpeg_wrapper(uint8_t* rdram, uint32_t ucode_addr) {
+    static std::atomic<int> wn{0};
+    const int c = wn.fetch_add(1);
+    const uint32_t out = g_njpeg_out.load(std::memory_order_relaxed);
+    auto rd = [&](uint32_t pa) -> uint32_t {
+        const uint32_t o = pa & 0x1FFFFFFFu;
+        return ((uint32_t)rdram[(o + 0) ^ 3] << 24) | ((uint32_t)rdram[(o + 1) ^ 3] << 16) |
+               ((uint32_t)rdram[(o + 2) ^ 3] << 8) | (uint32_t)rdram[(o + 3) ^ 3];
+    };
+    const uint32_t b0 = rd(out), b1 = rd(out + 4);
+    const RspExitReason r = njpgdspMain(rdram, ucode_addr);
+    if (c < 6) {
+        // Did the decode leave anything in DMEM? Distinguishes a VU/decode bug
+        // (DMEM all-zero -> nothing decoded) from a DMA/address bug (DMEM has
+        // data but the output DMA wrote zeros to RDRAM).
+        uint32_t dmem_nz = 0, dmem_first = 0xFFFFFFFFu;
+        for (uint32_t i = 0; i < 0x1000u; ++i) {
+            if (dmem[i] != 0) { ++dmem_nz; if (dmem_first == 0xFFFFFFFFu) dmem_first = i; }
+        }
+        std::fprintf(stderr,
+            "[PMS] njpeg run #%d exit=%d out=0x%08X  before=%08X %08X  after=%08X %08X  dmem_nz=%u first=0x%X\n",
+            c, (int)r, out, b0, b1, rd(out), rd(out + 4), dmem_nz, dmem_first);
+        std::fflush(stderr);
+    }
+    return r;
+}
+
 static RspUcodeFunc* get_rsp_microcode(uint8_t* rdram, const OSTask* task) {
     static std::atomic<bool> warned{false};
     if (task->t.type == M_AUDTASK) {
@@ -154,6 +189,13 @@ static RspUcodeFunc* get_rsp_microcode(uint8_t* rdram, const OSTask* task) {
     if (task->t.type == M_NJPEGTASK) {
         // PMS-J #5 diag: the PRESS START background is a JPEG; confirm the
         // decode task actually fires and with what params.
+        // Capture the decode-output address (task struct w0) for njpeg_wrapper.
+        {
+            const uint32_t sb = (uint32_t)task->t.data_ptr & 0x1FFFFFFFu;
+            const uint32_t w0 = ((uint32_t)rdram[(sb + 0) ^ 3] << 24) | ((uint32_t)rdram[(sb + 1) ^ 3] << 16) |
+                                ((uint32_t)rdram[(sb + 2) ^ 3] << 8) | (uint32_t)rdram[(sb + 3) ^ 3];
+            g_njpeg_out.store(w0, std::memory_order_relaxed);
+        }
         static std::atomic<uint32_t> n{0};
         uint32_t c = n.fetch_add(1);
         if (c < 6) {
@@ -177,7 +219,7 @@ static RspUcodeFunc* get_rsp_microcode(uint8_t* rdram, const OSTask* task) {
             std::fprintf(stderr, "\n");
             std::fflush(stderr);
         }
-        return njpgdspMain;
+        return njpeg_wrapper;
     }
     if (!warned.exchange(true)) {
         std::fprintf(stderr,

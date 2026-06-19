@@ -234,6 +234,22 @@ task-completion/sync issue). Until (2), the title background stays green
 (decoded-from-zero) rather than black. RT64 YUV `assert`s in loadTile/loadBlock
 are debug-only (no-op in release).
 
+**LAYER-2 PINNED (2026-06-18).** Wrapped njpgdspMain (njpeg_wrapper in
+`get_rsp_microcode`, main.cpp) to inspect execution + its output buffer
+(task w0) before/after. Result: the ucode **executes and returns
+RspExitReason::Broke** (normal completion), but its **RDRAM output (w0,
+0x26C9E0+) goes non-zero -> all-zero**: the recompiled njpeg writes ZEROS to
+the buffer the game then draws. DMEM has ~1400-1700 non-zero bytes after the
+run, but that is ambiguous (could be the leftover compressed/DCT *input*, not
+decoded output). So layer 2 is inside the recompiled RSP ucode: either the
+**output DMA reads a zero/wrong DMEM offset** (DMEM-source-address bug; see
+`DO_DMA_WRITE`/`SET_DMA_MEM` at njpgdspMain.cpp ~1565-1575) or the **VU/IDCT
+decode produces nothing**. aspMain (audio) uses the same DMA macros and works,
+which leans toward the VU/decode or an njpeg-specific DMEM-address issue.
+Fixing it requires tracing the recompiled njpgdspMain dataflow (where the
+decode writes DMEM vs where the output DMA reads) -- deep RSP-recompilation
+debugging, its own focused effort. Diagnostic njpeg_wrapper retained.
+
 ---
 
 ## #6 — Translation coverage + polish — **PAUSED**
