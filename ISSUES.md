@@ -201,6 +201,39 @@ resource is unloaded or the ucode is a stub. → Next: trace the background draw
 in RT64 (`RT64_CIMG_LOG` / RDP log) — the decoded CIMG/framebuffer likely is
 not scanned out / composited. This is the RT64-compositing candidate from above.
 
+**ROOT-CAUSED + partial fix (2026-06-18):** the title art is a JPEG decoded
+**MCU-by-MCU into YUV (G_IM_FMT_YUV, 16-bit) buffers** (njpeg output at
+~0x26C9E0+, +0x200/MCU) and drawn via the display list as ~329 YUV texrects
+(confirmed with RT64 `RT64_CIMG_LOG` setColorImage + a new setTextureImage
+log). **RT64 did not support YUV** — `rt64_rdp.cpp` loadTile/loadBlock have
+`assert(fmt != G_IM_FMT_YUV)` and the texture shader `TextureDecoder.hlsli`
+stubbed every YUV case to `float4(0,0,0,1)` (black). Implemented a YUYV 4:2:2
+-> RGB (BT.601) decode in `sampleTMEM` (16-bit YUV case). Result went **black
+-> green**: the decode runs but reads **zero texels** (green is the exact
+output for Y=0,chroma=0, independent of byte order), so the YUV data is not
+reaching the shader's TMEM read. **Remaining:** dump the actual TMEM bytes for
+a YUV texrect to pin the real layout (interleaved YUYV vs planar) and/or fix
+the texel-delivery path (loadTile/loadBlock YUV stride, or a framebuffer-
+overlap redirect to an empty FB). Diagnostics added: RT64 setTextureImage log
+(RT64_CIMG_LOG), PMS njpeg task-struct dump in get_rsp_microcode.
+
+**DEEPER BLOCKER FOUND (2026-06-18).** The green is **zero texels at the
+source**: the YUV texrects `loadBlock` from `0x26C9E0` (= the njpeg task's w0
+output addr) and the load runs, but the loaded TMEM bytes are **all 00**, i.e.
+`RDRAM[0x26C9E0]` is zero. So **the recompiled `njpgdspMain` is not writing
+decoded output to RDRAM** — the JPEG never actually decodes into the buffer the
+game draws. (It dispatches via get_rsp_microcode and logs no "Unhandled jump",
+but that does not prove it executes + writes.) So #5 needs TWO fixes: (1) RT64
+YUV texture decode — **DONE** (`TextureDecoder.hlsli` sampleTMEM 16b YUV ->
+BT.601 RGB; correct, will show the image once texels are non-zero); (2) make
+the recompiled njpeg ucode actually produce output — **the real remaining
+blocker** (RSP-ucode/runtime: confirm njpgdspMain executes via an app-side
+wrapper around the fn ptr in get_rsp_microcode + inspect/repro its RDRAM
+writeback; possibly an RSP DMA/output-writeback recompilation gap or a
+task-completion/sync issue). Until (2), the title background stays green
+(decoded-from-zero) rather than black. RT64 YUV `assert`s in loadTile/loadBlock
+are debug-only (no-op in release).
+
 ---
 
 ## #6 — Translation coverage + polish — **PAUSED**

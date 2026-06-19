@@ -161,6 +161,20 @@ static RspUcodeFunc* get_rsp_microcode(uint8_t* rdram, const OSTask* task) {
                 "[PMS] RSP M_NJPEGTASK #%u -> njpgdspMain (data=0x%08X dlen=0x%X ucode=0x%08X)\n",
                 c, (uint32_t)task->t.data_ptr, (uint32_t)task->t.data_size,
                 (uint32_t)task->t.ucode);
+            // Dump the njpeg task structure (its words include the source MCU
+            // pointer and the decode OUTPUT buffer) so #5 can tell whether the
+            // decoded image is drawn via the DL or blitted to a framebuffer.
+            const uint32_t base = (uint32_t)task->t.data_ptr & 0x1FFFFFFFu;
+            std::fprintf(stderr, "[PMS] njpeg task struct:");
+            for (int w = 0; w < 8; ++w) {
+                const uint32_t o = base + (uint32_t)w * 4u;
+                const uint32_t val = ((uint32_t)rdram[(o + 0) ^ 3] << 24) |
+                                     ((uint32_t)rdram[(o + 1) ^ 3] << 16) |
+                                     ((uint32_t)rdram[(o + 2) ^ 3] << 8) |
+                                     ((uint32_t)rdram[(o + 3) ^ 3]);
+                std::fprintf(stderr, " w%d=0x%08X", w, val);
+            }
+            std::fprintf(stderr, "\n");
             std::fflush(stderr);
         }
         return njpgdspMain;
