@@ -1,0 +1,22 @@
+text_offset = 0
+# Synthetic IMEM layout (mirrors aspMain.j.1.0.toml):
+#   - rspboot: ROM[0x5D8C0..0x5D940), loaded into IMEM[0..0x80)
+#   - njpgdsp: ROM[0x5F980..0x60980), loaded into IMEM[0x80..0x1080)
+# rspboot DMAs ucode_data to DMEM[0], then DMAs njpgdsp to SP_MEM_ADDR=0x1080
+# (IMEM offset 0x80) and jr's into it. Recompiling rspboot+njpgdsp together
+# gives the ucode the DMA-register state real rspboot leaves behind.
+#
+# The previous rsp/njpgdspMain.cpp was generated from Pokemon Stadium US's
+# njpgdsp and reused for PMS-J; the binaries differ (e.g. IMEM 0x0/0x18), so
+# the color/packing path read the wrong DMEM constants and produced zeros.
+# This regenerates from PMS-J's OWN njpgdsp ucode (ROM 0x5F980).
+# Code extent only: rspboot (0x80) + njpgdsp code through its final BREAK
+# (PC 0x18E0) and the DMA-wait subroutines that end at PC 0x195C. The njpgdsp
+# IMEM page is 0x1000 bytes but only ~0x8E0 is code; PC 0x1960.. is unused
+# trailing data (decodes to garbage like `movn`/`sll $zero`/`lb 0x49E0` and
+# breaks compilation if recompiled). Mirrors how the prior file was bounded.
+text_size = 0x960
+text_address = 0x04001000
+rom_file_path = "njpgdsp_combined.bin"
+output_file_path = "rsp/njpgdspMain.cpp"
+output_function_name = "njpgdspMain"
