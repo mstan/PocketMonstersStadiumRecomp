@@ -6,10 +6,12 @@
 # fork that this tree is known to build and boot against, so a checkout
 # is reproducible.
 #
-# All three forks are pinned on `main` (the runtime-overlay-discovery +
-# default-on fragment-tier work was promoted to main 2026-06-18; PMS was
-# rebuilt + verified non-regressed against these shas this session).
-# To roll forward: bump the sha, rebuild, and re-verify the boot.
+# All three forks are pinned on `main`. Bumped 2026-06-18 to the shas
+# that render the PRESS START title correctly (#5): the njpgdsp ucode was
+# regenerated from PMS-J's own binary (in this repo) and rt64 gained the
+# YUV byte-order + texrect-stride fixes. PMS verified booting + the title
+# rendering against these shas. To roll forward: bump the sha, rebuild,
+# and re-verify the boot.
 
 # ── lib/N64ModernRuntime — mstan/N64ModernRuntime ──────────────────
 # The runtime that stands in for the N64 OS. Carries the cooperative-
@@ -17,7 +19,7 @@
 # always-on ultra-trace ring used for PMS boot diagnosis. Embeds
 # N64Recomp as a git submodule at N64ModernRuntime/N64Recomp.
 n64modernruntime_branch = main
-n64modernruntime_sha    = 4379ba044f36f492adae34d86bc22e17d454ae60
+n64modernruntime_sha    = 519ec728f27d75173007965d3ae90f130c041402
 
 # ── (submodule) N64Recomp — mstan/N64Recomp ────────────────────────
 # The static recompiler. Unconditional loop-back-edge checkpoints +
@@ -27,8 +29,10 @@ n64recomp_branch = main
 n64recomp_sha    = 233b4d80434fc85d990ab7d7f6a41f50a75b1a7b
 
 # ── lib/rt64 — mstan/rt64 ──────────────────────────────────────────
-# The graphics renderer. Shared with PokemonStadiumRecomp; PMS builds
-# against the same SS Anne rt64 tip (uniform per-screen FB scaling for
-# supersampling, manual TMEM samplers).
+# The graphics renderer. Shared with PokemonStadiumRecomp. This tip adds
+# the njpeg/JPEG title-background rendering: G_IM_FMT_YUV texture decode
+# (BT.601), the [chroma(byte0),Y(byte1)] byte order, and the YUV texrect
+# stride fix (line<<4) — on top of the SS Anne FB-scaling / manual-TMEM
+# work.
 rt64_branch = main
-rt64_sha     = 4fcaf03c9f0ff6f52ec29d6be22bc7df22c46ffd
+rt64_sha     = 83ba03103479182fe150707197621f23682f42e3

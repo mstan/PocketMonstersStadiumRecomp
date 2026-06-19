@@ -12,7 +12,7 @@ set -euo pipefail
 
 N64MR_REPO="https://github.com/mstan/N64ModernRuntime.git"
 RT64_REPO="https://github.com/mstan/rt64.git"
-BRANCH="work/pocket-monsters-stadium"
+BRANCH="main"
 SISTER_N64MR="../N64ModernRuntime"
 SISTER_RT64="../rt64"
 

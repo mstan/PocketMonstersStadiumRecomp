@@ -15,7 +15,7 @@ setlocal enabledelayedexpansion
 
 set "N64MR_REPO=https://github.com/mstan/N64ModernRuntime.git"
 set "RT64_REPO=https://github.com/mstan/rt64.git"
-set "BRANCH=work/pocket-monsters-stadium"
+set "BRANCH=main"
 set "SISTER_N64MR=..\N64ModernRuntime"
 set "SISTER_RT64=..\rt64"
 
