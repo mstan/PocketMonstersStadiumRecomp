@@ -582,10 +582,9 @@ extern "C" uint32_t pkmnstadium_trace_capacity(void) {
 //
 // trace_mode=true makes the recompiler emit TRACE_ENTRY() at every function
 // entry; we extend that macro (include/trace.h) to also forward (ra,a0..a3)
-// here. This census is always-on from process start when armed (env
-// PMS_TEXTPROBE=1, read before the game runs — NOT armed mid-run), and keeps a
-// bounded per-PC tally of every function entry whose arguments match the
-// string-draw signature:
+// here. This census is ALWAYS-ON from process start for every user (no env
+// gate) and keeps a bounded per-PC tally of every function entry whose
+// arguments match the string-draw signature:
 //
 //   a0 (x) and a1 (y) are small (screen coords), and
 //   a2 (fmt) points at a NUL-terminated run of nonzero RDRAM bytes (glyphs).
@@ -791,9 +790,15 @@ extern "C" void pkmnstadium_textdraw_probe(const char* name,
                                            uint32_t a0, uint32_t a1,
                                            uint32_t a2, uint32_t a3) {
     (void)a3;
-    if (!textprobe_armed()) {
-        return;
-    }
+    // ALWAYS-ON capture (no env gate). The distinct-string inventory
+    // (stringdump.log) and the text-PC registration below run for EVERY user
+    // continuously from process start — the always-on ring-buffer model: we
+    // never "arm" capture and hope to catch the window, we record every unique
+    // on-screen string as it is first drawn and persist it immediately. This
+    // also seeds the text-PC set so the class-1 sibling routines translate
+    // during normal play (not only under a former PMS_TEXTPROBE capture).
+    // PMS_TEXTPROBE now only adds the developer watch-string discovery
+    // (xlate_discovery, in the xlate hook); the inventory itself is unconditional.
     unsigned char* rdram = recomp_runtime_get_rdram();
     if (rdram == nullptr) {
         return;
@@ -866,7 +871,8 @@ extern "C" void pkmnstadium_textdraw_dump(void) {
     std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
     std::fprintf(f, "=== text-draw census ===\n");
     std::fprintf(f, "  time:            %s\n", ts);
-    std::fprintf(f, "  armed:           %s\n", textprobe_armed() ? "yes" : "NO (set PMS_TEXTPROBE=1)");
+    std::fprintf(f, "  capture:         always-on (every user)\n");
+    std::fprintf(f, "  dev discovery:   %s\n", textprobe_armed() ? "on (PMS_TEXTPROBE)" : "off");
     std::fprintf(f, "  total fn entries:%llu\n", (unsigned long long)pkmnstadium_trace_write_idx());
     std::fprintf(f, "  qualifying calls:%llu\n",
                  (unsigned long long)g_text_qualifying.load(std::memory_order_relaxed));

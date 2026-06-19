@@ -26,11 +26,11 @@ extern "C" {
 
 void pkmnstadium_trace_push(const char *name);
 
-/* Text-draw discovery census (diagnostics.cpp). Armed by env PMS_TEXTPROBE=1;
- * a no-op (single bool check) otherwise. Records function entries whose args
- * match the string-draw signature so the PMS-J text-printf function can be
- * found empirically. ctx/rdram are in scope at every TRACE_ENTRY() call site
- * (they are the recompiled function's parameters). */
+/* Text-draw census + always-on string-inventory capture (diagnostics.cpp).
+ * Runs for every user from process start (no env gate): records every distinct
+ * on-screen string to stringdump.log and registers text-draw PCs so the runtime
+ * translation layer covers them. ctx/rdram are in scope at every TRACE_ENTRY()
+ * call site (they are the recompiled function's parameters). */
 void pkmnstadium_textdraw_probe(const char *name, unsigned int ra,
                                 unsigned int a0, unsigned int a1,
                                 unsigned int a2, unsigned int a3);

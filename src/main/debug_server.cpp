@@ -237,13 +237,14 @@ static std::string handle_line(const std::string& raw_line) {
     if (cmd == "textdump") {
         // Dump the text-draw discovery census (see diagnostics.cpp). Free-run
         // to the screen of interest, then send this to identify the string-draw
-        // function + inventory live strings. Requires launch with PMS_TEXTPROBE=1.
+        // function + inventory live strings. Capture is always-on (no env gate).
         pkmnstadium_textdraw_dump();
         return R"({"ok":true,"wrote":"textdraw_probe.log"})";
     }
     if (cmd == "stringdump") {
         // Dump the distinct-string inventory (every string drawn by the
-        // string-draw printf). Requires PMS_TEXTPROBE=1. Sweep all screens first.
+        // string-draw printf). Capture is always-on; the inventory also persists
+        // continuously to stringdump.log as new strings appear. Sweep screens first.
         pkmnstadium_stringdump();
         return R"({"ok":true,"wrote":"stringdump.log"})";
     }
