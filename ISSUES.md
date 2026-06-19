@@ -250,6 +250,35 @@ Fixing it requires tracing the recompiled njpgdspMain dataflow (where the
 decode writes DMEM vs where the output DMA reads) -- deep RSP-recompilation
 debugging, its own focused effort. Diagnostic njpeg_wrapper retained.
 
+**DECODE FIXED (2026-06-18).** Layer 2 root cause: `rsp/njpgdspMain.cpp`
+was generated from **Pokemon Stadium US's** njpgdsp and reused for PMS-J;
+the binaries differ. PMS-J's runtime ucode (ROM 0x5F980 / 0x8005ED80)
+diverges from the recompiled C at IMEM 0x0/0x18 and in the branch layout,
+so running PS-US's code on PMS-J's data gave correct IDCT intermediates
+(dense DMEM 0x560-0x850) but read mismatched DMEM constants in the color/
+packing pass -> every output DMA wrote 0/512 nonzero. Root-caused with an
+always-on RSP DMA trace ring + a gated VU store trace, then by diffing
+PMS-J's runtime ucode IMEM against the recompiled C. FIX: regenerated from
+PMS-J's OWN njpgdsp, recompiling rspboot+njpgdsp as a combined blob like
+aspMain (`njpgdspMain.j.1.0.toml` + `tools/build_njpgdsp_combined.py`,
+`text_size=0x960` bounds it to code). Now every njpeg run writes 512/512
+nonzero and an offline render of the decoded buffer shows the real title
+logo. Committed `be7987f` (branch `work/njpeg-decode-regen`). (The earlier
+"IMEM 0x18 = SP_RD_LEN DMA loading constants" idea was a mis-decode — it's
+`mtc0 SP_STATUS`; the cause was simply the wrong njpgdsp revision.)
+
+**RT64 YUV color FIXED, layout REMAINS (2026-06-18).** With real output
+flowing, the prior RT64 YUV decode showed solid green: it read Y from
+byte0 / chroma from byte1, but the RDRAM format is `[chroma(byte0),
+Y(byte1)]` (offline byte analysis: byte1 = luma gradient stdev~35, byte0
+= near-neutral chroma ~0x85 stdev~6). Fixed the byte order + neighbor
+offset in `TextureDecoder.hlsli` (committed rt64 `714875c` on
+work/pocket-monsters-stadium). The title now "loosely resembles the real
+image" (user-confirmed) but a **texrect layout/stride issue still garbles
+the block placement** — #5 stays OPEN for that. Next: `RT64_CIMG_LOG` to
+capture the YUV texrect params (size/format/coords/stride) and whether the
+16x16-block-linear buffer is being sampled as a flat raster.
+
 ---
 
 ## #6 — Translation coverage + polish — **PAUSED**
@@ -284,7 +313,31 @@ via RT64's texture/CIMG logging; compare against a correctly-transparent
 sprite. Same family as the long-standing "pointer-hand transparency"
 note in project memory.
 
-*Status.* Characterized + screenshotted; not yet root-caused.
+*Reproduced 2026-06-18 (deep menu).* Reached the Free-Battle lead-select
+("Select Entry Pokemon") and confirmed the issue: the small UI nav-arrow
+sprites (the ▼ / ▶▶ paging arrows, the ◄◄ button) render with a faint
+opaque box border around them, while the **Pokemon icon sprites in the
+same grid render correctly transparent**. So it is a per-sprite texture
+format / render-mode difference, NOT a global blend bug — some sprite
+class (the button/arrow/badge family) decodes its transparent surround
+as opaque, the Pokemon-icon class does not. Next: capture the texture
+load for an affected arrow vs a correct Pokemon icon (RT64 texture/CIMG
+logging) and compare format/TLUT/render-mode; fix the transparency in
+the decode/combiner path that the badge class uses.
+
+*Navigation path to a repro screen* (boot is non-deterministic + the
+title cycles an attract demo; the debug-server START needs a long hold,
+not a pulse): `hold:start:90` at PUSH START -> the no-cart console
+screen -> `press:a` -> "No Pak" P-OS menu (Battle highlighted) ->
+`press:a` (Battle) -> `press:a` (Enter? Yes) -> `press:a` (Free Battle)
+-> `press:a` (Battle) -> `press:a` (Select Opponent: COM) -> `press:a`
+-> lead-select. The ▼ / ▶▶ arrows at the bottom show the border. The
+clearer A/B/L/R battle prompts are one step deeper (in-match), behind
+the #1 enter-match crash.
+
+*Status.* Characterized + reproduced + navigation path documented; the
+affected sprite class is isolated (button/arrow/badge vs Pokemon icon).
+Not yet root-caused at the texture-format level.
 
 ---
 
