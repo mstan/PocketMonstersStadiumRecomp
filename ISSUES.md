@@ -189,8 +189,17 @@ screenshots: title-screen background resource load (resource-server
 PRESJPEG path in FINDINGS BOOT-003), a fragment/overlay that holds the
 title art (could overlap #1), or an RT64 compositing/layer issue.
 
-*Status.* Not yet root-caused; needs a live run + screenshot. Re-confirmed
-still missing by the user 2026-06-18.
+*Status.* Re-confirmed still missing by the user 2026-06-18. **Narrowed
+(2026-06-18):** confirmed on screen — "PUSH START" renders (dark) on a fully
+black background. Added RSP-task logging (`get_rsp_microcode` in `main.cpp`):
+the JPEG decode **task fires every frame** (`M_NJPEGTASK -> njpgdspMain`,
+data=0x80082740, dlen=0x20) and `njpgdspMain` (a real 1,614-line recompiled
+decoder, `rsp/njpgdspMain.cpp`) runs **cleanly — no "Unhandled jump target"
+errors**. So the decode is invoked and completes; the title art is missing
+because the decoded image is **not being drawn / composited**, not because the
+resource is unloaded or the ucode is a stub. → Next: trace the background draw
+in RT64 (`RT64_CIMG_LOG` / RDP log) — the decoded CIMG/framebuffer likely is
+not scanned out / composited. This is the RT64-compositing candidate from above.
 
 ---
 

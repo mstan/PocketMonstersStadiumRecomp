@@ -147,9 +147,22 @@ static void log_rsp_task_signature(uint8_t* rdram, const OSTask* task) {
 static RspUcodeFunc* get_rsp_microcode(uint8_t* rdram, const OSTask* task) {
     static std::atomic<bool> warned{false};
     if (task->t.type == M_AUDTASK) {
+        static std::atomic<bool> a{false};
+        if (!a.exchange(true)) { std::fprintf(stderr, "[PMS] RSP M_AUDTASK -> aspMain (first)\n"); std::fflush(stderr); }
         return aspMain;
     }
     if (task->t.type == M_NJPEGTASK) {
+        // PMS-J #5 diag: the PRESS START background is a JPEG; confirm the
+        // decode task actually fires and with what params.
+        static std::atomic<uint32_t> n{0};
+        uint32_t c = n.fetch_add(1);
+        if (c < 6) {
+            std::fprintf(stderr,
+                "[PMS] RSP M_NJPEGTASK #%u -> njpgdspMain (data=0x%08X dlen=0x%X ucode=0x%08X)\n",
+                c, (uint32_t)task->t.data_ptr, (uint32_t)task->t.data_size,
+                (uint32_t)task->t.ucode);
+            std::fflush(stderr);
+        }
         return njpgdspMain;
     }
     if (!warned.exchange(true)) {
