@@ -1251,12 +1251,20 @@ const uint8_t kWlBack[]    = {0xA4,0xE2,0xA4,0xC9,0xA4,0xEB};                   
 const uint8_t kWlConfirm[] = {0xA4,0xAB,0xA4,0xAF,0xA4,0xCB,0xA4,0xF3};           // かくにん
 const uint8_t kWlGround[]  = {0xA4,0xB8,0xA4,0xE1,0xA4,0xF3};                     // じめん (Ground type)
 const uint8_t kWlNormalT[] = {0xA5,0xCE,0xA1,0xBC,0xA5,0xDE,0xA5,0xEB};           // ノーマル (Normal type box)
+const uint8_t kWlSeedCat[] = {0xA4,0xBF,0xA4,0xCD,0xA5,0xDD,0xA5,0xB1,0xA5,0xE2,0xA5,0xF3}; // たねポケモン (Seed category)
 const WatchStr g_watch[] = {
     {kWlTrainer, 10, "Trainer"}, {kWlBack, 6, "Back"}, {kWlConfirm, 8, "Confirm"},
-    {kWlGround, 6, "Ground"}, {kWlNormalT, 8, "NormalT"},
+    {kWlGround, 6, "Ground"}, {kWlNormalT, 8, "NormalT"}, {kWlSeedCat, 12, "SeedCat"},
 };
-static const char* kSrcName[8] = {"a0/r4","a1/r5","a2/r6","a3/r7",
-                                  "sp+10","sp+14","sp+18","sp+1C"};
+// Broadened source set: args, a couple temps/returns, saved regs, and more stack
+// slots — to locate text-draw conventions beyond a0..a3 (e.g. the category label,
+// which is neither r6 nor r7).
+static const char* kSrcName[] = {
+    "a0/r4","a1/r5","a2/r6","a3/r7","t0/r8","t1/r9","v0/r2","v1/r3",
+    "s0/r16","s1/r17","s2/r18","s3/r19",
+    "sp+10","sp+14","sp+18","sp+1C","sp+20","sp+24","sp+28","sp+2C",
+};
+constexpr int kNSrc = 20;
 std::mutex g_disc_mtx;
 uint64_t g_disc_seen[128];
 uint32_t g_disc_n = 0;
@@ -1270,13 +1278,19 @@ bool guest_prefix_eq(unsigned char* rdram, uint32_t ptr, const uint8_t* want, ui
 
 void xlate_discovery(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
     const uint32_t sp = (uint32_t)ctx->r29;
-    uint32_t srcs[8];
-    srcs[0] = (uint32_t)ctx->r4; srcs[1] = (uint32_t)ctx->r5;
-    srcs[2] = (uint32_t)ctx->r6; srcs[3] = (uint32_t)ctx->r7;
-    srcs[4] = pms_diag_read_u32(rdram, sp + 0x10); srcs[5] = pms_diag_read_u32(rdram, sp + 0x14);
-    srcs[6] = pms_diag_read_u32(rdram, sp + 0x18); srcs[7] = pms_diag_read_u32(rdram, sp + 0x1C);
+    uint32_t srcs[kNSrc];
+    srcs[0] = (uint32_t)ctx->r4;  srcs[1] = (uint32_t)ctx->r5;
+    srcs[2] = (uint32_t)ctx->r6;  srcs[3] = (uint32_t)ctx->r7;
+    srcs[4] = (uint32_t)ctx->r8;  srcs[5] = (uint32_t)ctx->r9;
+    srcs[6] = (uint32_t)ctx->r2;  srcs[7] = (uint32_t)ctx->r3;
+    srcs[8] = (uint32_t)ctx->r16; srcs[9] = (uint32_t)ctx->r17;
+    srcs[10] = (uint32_t)ctx->r18; srcs[11] = (uint32_t)ctx->r19;
+    srcs[12] = pms_diag_read_u32(rdram, sp + 0x10); srcs[13] = pms_diag_read_u32(rdram, sp + 0x14);
+    srcs[14] = pms_diag_read_u32(rdram, sp + 0x18); srcs[15] = pms_diag_read_u32(rdram, sp + 0x1C);
+    srcs[16] = pms_diag_read_u32(rdram, sp + 0x20); srcs[17] = pms_diag_read_u32(rdram, sp + 0x24);
+    srcs[18] = pms_diag_read_u32(rdram, sp + 0x28); srcs[19] = pms_diag_read_u32(rdram, sp + 0x2C);
     for (uint32_t wi = 0; wi < sizeof(g_watch) / sizeof(g_watch[0]); ++wi) {
-        for (int s = 0; s < 8; ++s) {
+        for (int s = 0; s < kNSrc; ++s) {
             if (!guest_prefix_eq(rdram, srcs[s], g_watch[wi].b, g_watch[wi].n)) continue;
             const uint64_t k = ((uint64_t)pc << 8) | ((uint64_t)wi << 4) | (uint64_t)s;
             std::lock_guard<std::mutex> lk(g_disc_mtx);
@@ -1305,7 +1319,7 @@ void xlate_discovery(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
     {
         uint8_t lbuf[kSrcMax];
         uint16_t llen = 0;
-        for (int s = 0; s < 8; ++s) {
+        for (int s = 0; s < kNSrc; ++s) {
             if (!read_text_arg(rdram, srcs[s], lbuf, &llen)) continue;
             if (llen < 24) continue;
             const uint64_t k = 0x4000000000000000ull | ((uint64_t)pc << 4) | (uint64_t)s;
@@ -1491,30 +1505,36 @@ void xlate_general(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
     g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
 }
 
-// Pokedex DESCRIPTION draw (kDescDrawPC = 0x8001A920): the multi-line flavor text
-// is passed in a3/r7 (NOT r6 — it's the _Printf("%s", desc) vararg), which is why
-// the class-1 r6 probe never saw it. Read r7, look up the KV, and fmt-swap r7 to
-// the English replacement so the original routine renders it with its own
-// multi-line layout. KV-gated, so a non-description r7 is a harmless no-op.
+// Pokedex DESCRIPTION + CATEGORY draw (kDescDrawPC = 0x8001A920): this writeproc
+// receives the full string in r7 (multi-line flavor descriptions — the
+// _Printf("%s", desc) vararg) OR r4 (the "<X>ポケモン" category label),
+// depending on the caller. Neither is r6, which is why the class-1 probe never
+// saw them. Check r7 then r4; on a KV hit, fmt-swap that register to the English
+// so the original routine renders it. KV-gated, so a non-string register is a
+// harmless no-op.
 void xlate_desc(unsigned char* rdram, recomp_context* ctx) {
-    uint8_t src[kSrcMax];
-    uint16_t len = 0;
-    if (!read_text_arg(rdram, (uint32_t)ctx->r7, src, &len)) return;
-    const uint64_t key = pms_fnv1a(src, len);
-    XlateVal v;
-    {
-        std::lock_guard<std::mutex> lk(g_xlate_mtx);
-        auto it = g_xlate.find(key);
-        if (it == g_xlate.end()) return;
-        v = it->second;
-    }
     const uint32_t sp = (uint32_t)ctx->r29;
     if (sp < 0x80000C00u) return;
     const uint32_t scratch = (sp - 0x800u) & ~7u;
-    if (v.en.size() > 0x300u) return;
-    if (!write_guest_str(rdram, scratch, v.en)) return;
-    ctx->r7 = scratch;
-    g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
+    uint64_t* cand[2] = { &ctx->r7, &ctx->r4 };
+    for (int i = 0; i < 2; ++i) {
+        uint8_t src[kSrcMax];
+        uint16_t len = 0;
+        if (!read_text_arg(rdram, (uint32_t)*cand[i], src, &len)) continue;
+        const uint64_t key = pms_fnv1a(src, len);
+        XlateVal v;
+        {
+            std::lock_guard<std::mutex> lk(g_xlate_mtx);
+            auto it = g_xlate.find(key);
+            if (it == g_xlate.end()) continue;
+            v = it->second;
+        }
+        if (v.en.size() > 0x300u) continue;
+        if (!write_guest_str(rdram, scratch, v.en)) continue;
+        *cand[i] = scratch;
+        g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
 }
 } // namespace
 
