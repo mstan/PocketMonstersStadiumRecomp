@@ -1565,6 +1565,7 @@ void xlate_general(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
             g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+
     // fmt-swap: repoint r6 at the English replacement and let the ORIGINAL
     // routine render it.
     if (!write_guest_str(rdram, scratch, v.en)) return;
@@ -1605,6 +1606,19 @@ void xlate_desc(unsigned char* rdram, recomp_context* ctx) {
         const uint32_t scratch = swap_scratch(sp, v.en.find('%') != std::string::npos);
         if (!write_guest_str(rdram, scratch, v.en)) continue;
         *cand[i] = scratch;
+        // 0x8001A920 is _Printf's writeproc callback: it copies a2=r6=COUNT
+        // bytes from a1=r5=src (-> FUN_80056690). _Printf computed that count
+        // from the ORIGINAL Japanese before we swapped the pointer, so when the
+        // English length differs the copy mis-sizes: a SHORTER replacement (e.g.
+        // かえん 6B -> "Flame" 5B) copies 6 bytes from "Flame\0", embedding a NUL
+        // that truncates the buffer -> the trailing " Pokemon" lands past the NUL
+        // and the category renders as just "Flame". (たね 4B->Seed 4B, とかげ 6B->
+        // Lizard 6B happened to match, which is why only かえん broke.) When we
+        // swap the writeproc's src (a1=r5), re-sync the count to the English
+        // length so it copies exactly the replacement and advances the cursor
+        // correctly. Only for the r5/a1 src case — r7/r4 are other conventions.
+        if (cand[i] == &ctx->r5)
+            ctx->r6 = (uint32_t)v.en.size();
         g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
         return;
     }
