@@ -33,6 +33,7 @@
 extern "C" void pkmnstadium_textdraw_dump(void);
 extern "C" void pkmnstadium_fontdump(void);
 extern "C" void pkmnstadium_stringdump(void);
+extern "C" void pkmnstadium_memscan(unsigned int minlen);
 
 // Lookup-miss capture debug hooks (librecomp overlays.cpp). Used to
 // validate the always-on capture pipeline without a real crash.
@@ -253,6 +254,14 @@ static std::string handle_line(const std::string& raw_line) {
         // answer the Latin-glyph question. Free-run to a text screen first.
         pkmnstadium_fontdump();
         return R"({"ok":true,"wrote":"fontdump.log + font_slotN.i8"})";
+    }
+    if (cmd == "memscan") {
+        // Scan all of RDRAM for EUC-JP text runs (>= minlen, default 24) -> memscan.log.
+        // Extracts source text already loaded in RAM (e.g. the Pokedex description
+        // table) so it can be translated in bulk without visiting each entry.
+        unsigned int minlen = (unsigned int)get_float(line, "minlen", 24.0f);
+        pkmnstadium_memscan(minlen);
+        return R"({"ok":true,"wrote":"memscan.log"})";
     }
     if (cmd == "dump_sections") {
         // Dump the live loaded-section table to build/loaded_sections.json

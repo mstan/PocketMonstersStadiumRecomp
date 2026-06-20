@@ -599,6 +599,10 @@ constexpr uint32_t kTextCandCap   = 256; // distinct PCs tracked
 constexpr uint32_t kTextSampleLen = 64;  // source bytes shown per PC (find aid)
 constexpr uint32_t kSrcMax        = 256; // max source string captured/hashed
 constexpr uint32_t kStringDrawPC  = 0x8001A944u; // PMS-J string-draw printf
+constexpr uint32_t kDescDrawPC    = 0x8001A920u; // PMS-J Pokedex description draw;
+                                                 // string in a3/r7 (NOT r6), drawn
+                                                 // via _Printf("%s", desc). Found via
+                                                 // the LONGTEXT discovery probe.
 constexpr uint32_t kPrintfPC      = 0x80055CE0u; // PMS-J _Printf (vararg fmt);
                                                  // a0=writeproc a1=dest a2=fmt.
                                                  // Universal formatter chokepoint
@@ -931,6 +935,50 @@ extern "C" void pkmnstadium_stringdump(void) {
     std::fflush(stderr);
 }
 
+// Scan ALL of RDRAM for EUC-JP text runs (>= minlen bytes, containing at least
+// one JP byte) and write them to memscan.log as "<addr> <len> <hex>". Finds
+// source text already loaded/decompressed in RAM (e.g. the Pokedex description
+// table) so it can be extracted in bulk WITHOUT visiting each entry in game.
+// A run ends at the first non-EUC-JP byte (NUL/pointer/binary), so table entries
+// separate cleanly. Decode the hex with euc_jp in the host tool.
+extern "C" void pkmnstadium_memscan(uint32_t minlen) {
+    unsigned char* rdram = recomp_runtime_get_rdram();
+    if (rdram == nullptr) return;
+    if (minlen < 4) minlen = 4;
+    const std::string path = pms::app_file("memscan.log").string();
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (f == nullptr) return;
+    const uint32_t base = 0x80000000u, end = 0x80800000u;
+    auto textish = [](unsigned char c) {
+        return (c == 0x0A) || (c >= 0x20 && c <= 0x7E) || c == 0x8E || c == 0x8F ||
+               (c >= 0xA1 && c <= 0xFE);
+    };
+    uint8_t buf[2048];
+    uint32_t found = 0;
+    uint32_t a = base;
+    while (a < end) {
+        if (!textish(rdram[(a & 0x1FFFFFFFu) ^ 3])) { ++a; continue; }
+        uint32_t n = 0; bool hasJP = false; uint32_t p = a;
+        while (p < end && n < sizeof(buf)) {
+            unsigned char cc = rdram[(p & 0x1FFFFFFFu) ^ 3];
+            if (!textish(cc)) break;
+            if (cc >= 0x80) hasJP = true;
+            buf[n++] = cc; ++p;
+        }
+        if (n >= minlen && hasJP) {
+            std::fprintf(f, "0x%08X %u ", a, n);
+            for (uint32_t k = 0; k < n; ++k) std::fprintf(f, "%02x", buf[k]);
+            std::fprintf(f, "\n");
+            ++found;
+        }
+        a = p + 1;
+    }
+    std::fclose(f);
+    std::fprintf(stderr, "[PMS] memscan: %u EUC-JP runs (>=%u bytes) -> memscan.log\n",
+                 found, minlen);
+    std::fflush(stderr);
+}
+
 // ---- Runtime English-translation layer -------------------------------------
 //
 // Hooks the string-draw printf (PMS-J 0x8001A944) at its TRACE_ENTRY (the
@@ -1248,6 +1296,35 @@ void xlate_discovery(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
             }
         }
     }
+
+    // General LONG-TEXT discovery: log any source pointing at a long (>=24 byte)
+    // EUC-JP run — finds the routine + register convention for the Pokedex
+    // descriptions / multi-line text that the class-1 (r6+coords) probe misses.
+    // Logs the bytes too, so the description src_hex is captured here as well.
+    // Once per (pc, source).
+    {
+        uint8_t lbuf[kSrcMax];
+        uint16_t llen = 0;
+        for (int s = 0; s < 8; ++s) {
+            if (!read_text_arg(rdram, srcs[s], lbuf, &llen)) continue;
+            if (llen < 24) continue;
+            const uint64_t k = 0x4000000000000000ull | ((uint64_t)pc << 4) | (uint64_t)s;
+            std::lock_guard<std::mutex> lk(g_disc_mtx);
+            bool seen = false;
+            for (uint32_t i = 0; i < g_disc_n; ++i) if (g_disc_seen[i] == k) { seen = true; break; }
+            if (seen) continue;
+            if (g_disc_n < 128) g_disc_seen[g_disc_n++] = k;
+            const std::string path = pms::app_file("xlate_discovery.log").string();
+            FILE* f = std::fopen(path.c_str(), "a");
+            if (f) {
+                std::fprintf(f, "LONGTEXT pc=0x%08X via %-6s len=%u ra=0x%08X hex=",
+                             pc, kSrcName[s], (unsigned)llen, (uint32_t)ctx->r31);
+                for (uint16_t k2 = 0; k2 < llen; ++k2) std::fprintf(f, "%02x", lbuf[k2]);
+                std::fprintf(f, "\n");
+                std::fclose(f);
+            }
+        }
+    }
 }
 
 // Self-render a static (no-%) English string at (r4,r5) using the game's glyph
@@ -1413,6 +1490,32 @@ void xlate_general(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
     ctx->r6 = scratch;
     g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
 }
+
+// Pokedex DESCRIPTION draw (kDescDrawPC = 0x8001A920): the multi-line flavor text
+// is passed in a3/r7 (NOT r6 — it's the _Printf("%s", desc) vararg), which is why
+// the class-1 r6 probe never saw it. Read r7, look up the KV, and fmt-swap r7 to
+// the English replacement so the original routine renders it with its own
+// multi-line layout. KV-gated, so a non-description r7 is a harmless no-op.
+void xlate_desc(unsigned char* rdram, recomp_context* ctx) {
+    uint8_t src[kSrcMax];
+    uint16_t len = 0;
+    if (!read_text_arg(rdram, (uint32_t)ctx->r7, src, &len)) return;
+    const uint64_t key = pms_fnv1a(src, len);
+    XlateVal v;
+    {
+        std::lock_guard<std::mutex> lk(g_xlate_mtx);
+        auto it = g_xlate.find(key);
+        if (it == g_xlate.end()) return;
+        v = it->second;
+    }
+    const uint32_t sp = (uint32_t)ctx->r29;
+    if (sp < 0x80000C00u) return;
+    const uint32_t scratch = (sp - 0x800u) & ~7u;
+    if (v.en.size() > 0x300u) return;
+    if (!write_guest_str(rdram, scratch, v.en)) return;
+    ctx->r7 = scratch;
+    g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
+}
 } // namespace
 
 // Forwarded from include/trace.h's TRACE_ENTRY() on every recompiled-fn entry.
@@ -1432,6 +1535,8 @@ extern "C" void pkmnstadium_text_xlate(const char* name,
     recomp_context* ctx = static_cast<recomp_context*>(ctxv);
     const uint32_t pc = parse_fun_pc(name);
     if (textprobe_armed()) xlate_discovery(rdram, ctx, pc); // capture-only
+    // Pokedex descriptions draw via 0x8001A920 with the text in a3/r7.
+    if (pc == kDescDrawPC) { xlate_desc(rdram, ctx); return; }
     // Every text routine except the primary string-draw printf goes through the
     // generalized fmt-swap path; kStringDrawPC keeps its proportional self-render.
     if (pc != kStringDrawPC) { xlate_general(rdram, ctx, pc); return; }
