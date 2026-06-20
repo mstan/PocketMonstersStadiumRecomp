@@ -1339,6 +1339,34 @@ void xlate_discovery(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
             }
         }
     }
+
+    // PCLOG: for the printf/writeproc/draw PCs in the category path, dump every
+    // arg-register string (r4..r7) so we can see exactly how the "%sポケモン"
+    // category is streamed (which routine reads the format vs the classifier).
+    if (pc == 0x80055CE0u || pc == 0x8001A920u || pc == 0x8001AC3Cu) {
+        uint64_t regv[4] = { ctx->r4, ctx->r5, ctx->r6, ctx->r7 };
+        const char* rn[4] = { "r4", "r5", "r6", "r7" };
+        for (int s = 0; s < 4; ++s) {
+            uint8_t b[kSrcMax]; uint16_t bl = 0;
+            if (!read_text_arg(rdram, (uint32_t)regv[s], b, &bl)) continue;
+            const uint64_t hh = pms_fnv1a(b, bl);
+            const uint64_t k = 0x6000000000000000ull ^ ((uint64_t)pc << 4) ^ (uint64_t)s ^ (hh << 8);
+            std::lock_guard<std::mutex> lk(g_disc_mtx);
+            bool seen = false;
+            for (uint32_t i = 0; i < g_disc_n; ++i) if (g_disc_seen[i] == k) { seen = true; break; }
+            if (seen) continue;
+            if (g_disc_n < 128) g_disc_seen[g_disc_n++] = k;
+            const std::string path = pms::app_file("xlate_discovery.log").string();
+            FILE* f = std::fopen(path.c_str(), "a");
+            if (f) {
+                std::fprintf(f, "PCLOG    pc=0x%08X %s=0x%08X len=%u ra=0x%08X hex=",
+                             pc, rn[s], (uint32_t)regv[s], (unsigned)bl, (uint32_t)ctx->r31);
+                for (uint16_t k2 = 0; k2 < bl; ++k2) std::fprintf(f, "%02x", b[k2]);
+                std::fprintf(f, "\n");
+                std::fclose(f);
+            }
+        }
+    }
 }
 
 // Self-render a static (no-%) English string at (r4,r5) using the game's glyph
@@ -1516,8 +1544,11 @@ void xlate_desc(unsigned char* rdram, recomp_context* ctx) {
     const uint32_t sp = (uint32_t)ctx->r29;
     if (sp < 0x80000C00u) return;
     const uint32_t scratch = (sp - 0x800u) & ~7u;
-    uint64_t* cand[2] = { &ctx->r7, &ctx->r4 };
-    for (int i = 0; i < 2; ++i) {
+    // The writeproc receives the %s segment in r7 (descriptions), r4 (full result),
+    // or r5 (the "%sポケモン" category classifier, read from a table) depending on
+    // the _Printf call site — check all three. KV-gated, first match wins.
+    uint64_t* cand[3] = { &ctx->r7, &ctx->r4, &ctx->r5 };
+    for (int i = 0; i < 3; ++i) {
         uint8_t src[kSrcMax];
         uint16_t len = 0;
         if (!read_text_arg(rdram, (uint32_t)*cand[i], src, &len)) continue;
