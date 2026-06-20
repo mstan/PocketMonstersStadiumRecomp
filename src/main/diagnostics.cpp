@@ -1623,6 +1623,7 @@ void xlate_desc(unsigned char* rdram, recomp_context* ctx) {
         return;
     }
 }
+
 } // namespace
 
 // Forwarded from include/trace.h's TRACE_ENTRY() on every recompiled-fn entry.
@@ -1661,6 +1662,68 @@ extern "C" void pkmnstadium_text_xlate(const char* name,
     if (len == 0) return;
 
     const uint64_t key = pms_fnv1a(src, len);
+    const uint32_t sp = (uint32_t)ctx->r29;
+    if (sp < 0x80000C00u) return; // need stack headroom for scratch
+
+    // Single-"%s" formats at the renderer. FUN_8001a944 is BOTH the _Printf
+    // composer AND the glyph-loop renderer (x=r4, y=r5, the one arg = a3=r7). It
+    // is called with bare "%s" for distribution / Pokedex-UI labels (the real
+    // text is the arg) and with "%sポケモン"-style templates for categories. The
+    // original path composes into a buffer bounded to the JAPANESE byte length
+    // (truncating longer English, e.g. "Tiny Turtle Pokemon" -> "Tiny Turtle ")
+    // and draws FIXED-WIDTH (spills the box). Instead compose the full English
+    // ourselves and self-render proportionally, fit to the original JP footprint
+    // so it never spills past where the Japanese did. KV-gated on the arg, so
+    // anything we don't translate (numbers, names) falls through untouched.
+    {
+        std::string tmpl;                              // English template
+        {
+            std::lock_guard<std::mutex> lk(g_xlate_mtx);
+            auto it = g_xlate.find(key);
+            if (it != g_xlate.end()) tmpl.assign(it->second.en);
+        }
+        if (tmpl.empty() && len == 2 && src[0] == '%' && src[1] == 's')
+            tmpl = "%s";                               // bare "%s" (not a KV entry)
+        const size_t p = tmpl.find("%s");
+        const bool single_s = p != std::string::npos &&
+                              tmpl.find('%') == p &&
+                              tmpl.find('%', p + 2) == std::string::npos;
+        if (single_s) {
+            uint8_t arg[kSrcMax]; uint16_t al = 0;
+            if (read_text_arg(rdram, (uint32_t)ctx->r7, arg, &al)) {
+                std::string cls;
+                {
+                    std::lock_guard<std::mutex> lk(g_xlate_mtx);
+                    auto it = g_xlate.find(pms_fnv1a(arg, al));
+                    if (it != g_xlate.end() && it->second.en.find('%') == std::string::npos)
+                        cls = it->second.en;
+                }
+                if (!cls.empty()) {
+                    std::string full = tmpl.substr(0, p) + cls + tmpl.substr(p + 2);
+                    // budget (glyphs) = original JP footprint = arg glyphs + the
+                    // template's JP-suffix glyphs; shorter English is left at its
+                    // natural width, longer English is condensed to fit.
+                    int budget = 0;
+                    for (uint16_t i = 0; i < al; ) { i += (arg[i] >= 0x80 ? 2 : 1); ++budget; }
+                    for (uint32_t i = 0; i < len; ) {
+                        if (src[i] == '%' && i + 1 < len && src[i + 1] == 's') { i += 2; continue; }
+                        i += (src[i] >= 0x80 ? 2u : 1u); ++budget;
+                    }
+                    const uint32_t sc = swap_scratch(sp, false);
+                    if (full.size() <= 0x300u &&
+                        self_render_static(rdram, ctx,
+                                           reinterpret_cast<const uint8_t*>(full.data()),
+                                           (uint32_t)full.size(), full, sc, budget)) {
+                        g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // Non-single-%s strings: fmt lookup -> fmt-swap (%-templates) or static
+    // proportional self-render (plain strings) fit to the JP footprint.
     XlateVal v;
     {
         std::lock_guard<std::mutex> lk(g_xlate_mtx);
@@ -1668,24 +1731,14 @@ extern "C" void pkmnstadium_text_xlate(const char* name,
         if (it == g_xlate.end()) return;
         v = it->second;
     }
-    // Transient scratch on the caller's guest stack, well below any frame the
-    // original + _Printf will use (~0x300). Per-call sp -> reentrancy-safe.
-    const uint32_t sp = (uint32_t)ctx->r29;
-    if (sp < 0x80000C00u) return; // not enough stack headroom for scratch
-    if (v.en.size() > 0x300u) return;             // sanity cap
+    if (v.en.size() > 0x300u) return;                  // sanity cap
     const uint32_t scratch = swap_scratch(sp, v.en.find('%') != std::string::npos);
-
-    // %-format strings keep the original formatting path (dynamic args intact):
-    // swap the fmt pointer and let the original _Printf + render run.
     if (v.en.find('%') != std::string::npos) {
         if (!write_guest_str(rdram, scratch, v.en)) return;
         ctx->r6 = scratch;
         g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-
-    // Static strings: self-render with proportional spacing + auto-fit. budget =
-    // fit_w override when set, else -1 = match the per-line Japanese footprint.
     if (self_render_static(rdram, ctx, src, len, v.en, scratch, v.fit_w))
         g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
 }
