@@ -1155,6 +1155,20 @@ bool write_guest_str(uint8_t* rdram, uint32_t va, const std::string& s) {
     rdram[(pa + s.size()) ^ 3] = 0;
     return true;
 }
+
+// Two DISJOINT guest-scratch slots for in-flight register swaps within a single
+// _Printf. When one _Printf has BOTH its format string AND an argument
+// translated, the two swaps must land at DIFFERENT guest addresses or the second
+// clobbers the first. This was the root cause of the "%sポケモン" category
+// composing to just "Flame": the format-swap wrote "%s Pokemon" to (sp-0x800)
+// and the classifier-swap wrote "Flame" to the SAME (sp-0x800), so _Printf read
+// the format as "Flame" -> no %s expansion, no " Pokemon". A format template
+// (English still contains '%') keeps the original sp-0x800 slot; a literal arg
+// gets sp-0xC00. The 0x400 gap exceeds the 0x300 string cap so neighbours never
+// overlap; both sit below the _Printf working buffers and far above static data.
+inline uint32_t swap_scratch(uint32_t sp, bool is_fmt) {
+    return (sp - (is_fmt ? 0x800u : 0xC00u)) & ~7u;
+}
 } // namespace
 
 // The PMS-J glyph drawer (emitted): draws one glyph at (r4=x, r5=y, r6=code)
@@ -1366,6 +1380,29 @@ void xlate_discovery(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
                 std::fclose(f);
             }
         }
+        // Raw registers + font-state struct at the category DRAW (0x8001AC3C) —
+        // to locate the draw cursor x/y so the category can be self-rendered with
+        // fit. Logged once.
+        if (pc == 0x8001AC3Cu) {
+            static std::atomic<int> once{0};
+            if (once.fetch_add(1) == 0) {
+                const uint32_t st = pms_diag_read_u32(rdram, 0x800AD200u);
+                const std::string path = pms::app_file("xlate_discovery.log").string();
+                FILE* f = std::fopen(path.c_str(), "a");
+                if (f) {
+                    std::fprintf(f, "REGDUMP 0x8001AC3C r4=%08X r5=%08X r6=%08X r7=%08X r8=%08X r9=%08X "
+                                 "r16=%08X r17=%08X r18=%08X r19=%08X r20=%08X r21=%08X sp=%08X\n",
+                                 (uint32_t)ctx->r4,(uint32_t)ctx->r5,(uint32_t)ctx->r6,(uint32_t)ctx->r7,
+                                 (uint32_t)ctx->r8,(uint32_t)ctx->r9,(uint32_t)ctx->r16,(uint32_t)ctx->r17,
+                                 (uint32_t)ctx->r18,(uint32_t)ctx->r19,(uint32_t)ctx->r20,(uint32_t)ctx->r21,
+                                 (uint32_t)ctx->r29);
+                    std::fprintf(f, "FONTST  ptr=0x%08X bytes=", st);
+                    for (uint32_t o = 0; o < 0x40; ++o) std::fprintf(f, "%02x", guest_rb(rdram, st + o));
+                    std::fprintf(f, "\n");
+                    std::fclose(f);
+                }
+            }
+        }
     }
 }
 
@@ -1510,8 +1547,10 @@ void xlate_general(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
     }
     const uint32_t sp = (uint32_t)ctx->r29;
     if (sp < 0x80000C00u) return;                  // need stack headroom
-    const uint32_t scratch = (sp - 0x800u) & ~7u;  // per-call -> reentrancy-safe
     if (v.en.size() > 0x300u) return;
+    // Format templates ('%') and literal args use disjoint slots (see
+    // swap_scratch) so a paired _Printf swap never self-clobbers.
+    const uint32_t scratch = swap_scratch(sp, v.en.find('%') != std::string::npos);
 
     // Coordinate-based text drawers (x=r4, y=r5 look like screen coords) share
     // kStringDrawPC's (x=r4,y=r5,str=r6) convention, so give them the SAME
@@ -1543,7 +1582,6 @@ void xlate_general(unsigned char* rdram, recomp_context* ctx, uint32_t pc) {
 void xlate_desc(unsigned char* rdram, recomp_context* ctx) {
     const uint32_t sp = (uint32_t)ctx->r29;
     if (sp < 0x80000C00u) return;
-    const uint32_t scratch = (sp - 0x800u) & ~7u;
     // The writeproc receives the %s segment in r7 (descriptions), r4 (full result),
     // or r5 (the "%sポケモン" category classifier, read from a table) depending on
     // the _Printf call site — check all three. KV-gated, first match wins.
@@ -1561,6 +1599,10 @@ void xlate_desc(unsigned char* rdram, recomp_context* ctx) {
             v = it->second;
         }
         if (v.en.size() > 0x300u) continue;
+        // Literal args (e.g. the category classifier "Flame") take the arg slot,
+        // disjoint from the format-string slot ("%s Pokemon") so the classifier
+        // swap can't clobber the format swap in the same _Printf.
+        const uint32_t scratch = swap_scratch(sp, v.en.find('%') != std::string::npos);
         if (!write_guest_str(rdram, scratch, v.en)) continue;
         *cand[i] = scratch;
         g_xlate_hits.fetch_add(1, std::memory_order_relaxed);
@@ -1616,8 +1658,8 @@ extern "C" void pkmnstadium_text_xlate(const char* name,
     // original + _Printf will use (~0x300). Per-call sp -> reentrancy-safe.
     const uint32_t sp = (uint32_t)ctx->r29;
     if (sp < 0x80000C00u) return; // not enough stack headroom for scratch
-    const uint32_t scratch = (sp - 0x800u) & ~7u;
     if (v.en.size() > 0x300u) return;             // sanity cap
+    const uint32_t scratch = swap_scratch(sp, v.en.find('%') != std::string::npos);
 
     // %-format strings keep the original formatting path (dynamic args intact):
     // swap the fmt pointer and let the original _Printf + render run.

@@ -19,10 +19,25 @@ def main(argv) -> int:
     a = ap.parse_args(argv)
     s = socket.create_connection(("127.0.0.1", a.port), timeout=8)
     f = s.makefile("rwb", buffering=0)
-    for c in a.cmds:
-        f.write((json.dumps({"cmd": c}) + "\n").encode())
+    i = 0
+    while i < len(a.cmds):
+        obj = {"cmd": a.cmds[i]}
+        i += 1
+        # consume trailing key=value tokens as params for this command
+        while i < len(a.cmds) and "=" in a.cmds[i]:
+            k, v = a.cmds[i].split("=", 1)
+            try:
+                v = int(v)
+            except ValueError:
+                try:
+                    v = float(v)
+                except ValueError:
+                    pass
+            obj[k] = v
+            i += 1
+        f.write((json.dumps(obj) + "\n").encode())
         line = f.readline()
-        print(f"{c} -> {line.decode().strip() if line else '(no reply)'}")
+        print(f"{obj} -> {line.decode().strip() if line else '(no reply)'}")
     f.close(); s.close()
     return 0
 

@@ -33,6 +33,9 @@ n64recomp_sha    = 233b4d80434fc85d990ab7d7f6a41f50a75b1a7b
 # the njpeg/JPEG title-background rendering: G_IM_FMT_YUV texture decode
 # (BT.601), the [chroma(byte0),Y(byte1)] byte order, and the YUV texrect
 # stride fix (line<<4) — on top of the SS Anne FB-scaling / manual-TMEM
-# work.
+# work. Bumped 2026-06-19 for two Pokedex render fixes: render-target reuse
+# at a changed resolution scale (kills the 3D-model-viewer window-over-window
+# artifact) and presenting full RDRAM when a framebuffer is shorter than the
+# VI scanout (removes the bottom black bar that hid the flavor text).
 rt64_branch = main
-rt64_sha     = 83ba03103479182fe150707197621f23682f42e3
+rt64_sha     = d26aa0fc1dc5d5f5d141482e4bc2b11ead0cf497
