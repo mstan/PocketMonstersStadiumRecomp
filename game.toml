@@ -57,6 +57,37 @@ force_function_vrams = [
     # CRASH-001 0x8212D600 inside func_8212D504, and 0x82173CEC) no longer
     # need per-address seeding. Seed here only for true gap/standalone
     # entries the runtime self-heal can't reach (none known yet).
+    #
+    # GB-mode operator-dispatcher leaves (func_81103C40). This dispatcher
+    # (a GB-CPU microop applier) selects one of FOUR tiny leaf operators by
+    # a2 in {0,1,2,else} via lui s3,0x8110; addiu s3, 0x3BB4/0x3BD0/0x3BEC/
+    # 0x3C34, then `jalr s3` in a loop. They are reached ONLY by that computed
+    # jalr — never a direct jal — so static CFG discovery never carved them
+    # into functions: the enclosing func_811030F0 ends at 0x81103BB0 (jr ra +
+    # delay slot) and 0x81103BB4..0x81103C3C was an unclaimed gap. Without
+    # these, get_function(<runtime base>+0x3BB4) misses -> lookup-miss
+    # trampoline no-op -> the operator never runs -> GB-init stalls (the
+    # high-pri kickoff threads t0/t2/t5 park on queues nothing sends to) =
+    # GB-mode softlock. LINK vrams (NOT the runtime miss 0x80121EB4) so they
+    # become standalone recompiled leaf functions in section 1.
+    0x81103BB4,  # GB op-dispatch leaf (a2==0 / default)
+    0x81103BD0,  # GB op-dispatch leaf (a2==1)
+    0x81103BEC,  # GB op-dispatch leaf (a2==2)
+    0x81103C34,  # GB op-dispatch leaf (a2==else)
+    # Round 2: more GB-section (section 1) indirect-only entries surfaced by
+    # the runtime capture once the op-dispatch leaves above let GB-init run
+    # further. These are GB-CPU handler functions reached via computed jalr /
+    # opcode tables (no direct jal), captured as "code-entry" misses
+    # (build/coverage/runtime_captures.json). LINK vrams = section-1 link base
+    # 0x81100000 + offset_in_section. Without them the handler no-ops -> a
+    # downstream computed jump lands on a raw GB-space address (e.g. the
+    # 0x3FFF98C1 abort).
+    0x81100C84,  # GB handler (runtime 0x8011EF84, off 0xC84)
+    0x811184F4,  # GB handler (runtime 0x801367F4, off 0x184F4)
+    0x81118978,  # GB handler (runtime 0x80136C78, off 0x18978)
+    # Round 3: surfaced by the one-run discovery sweep (PSR_INTERP_DISCOVERY)
+    # once rounds 1-2 let GB-init create + run its emulator threads.
+    0x81119964,  # GB handler (runtime 0x80137C64, off 0x19964)
     # >>> BEGIN auto-folded from runtime_captures.json -- managed by tools/fold_captures.py
     0x82117ED4,  # outside-loaded hit_count=2366
     0x82117F08,  # outside-loaded hit_count=2366

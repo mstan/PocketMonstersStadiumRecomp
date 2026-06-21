@@ -150,6 +150,21 @@ def main(argv) -> int:
                 print("jit_test " + json.dumps(c.command("jit_test", addr=addr)))
             elif act == "evictall":
                 print("jit_evict_all " + json.dumps(c.command("jit_evict_all")))
+            elif act.startswith("mem:"):
+                parts = act.split(":")
+                addr = parts[1]
+                length = int(parts[2]) if len(parts) > 2 else 256
+                print("read_mem " + json.dumps(c.command("read_mem", addr=addr, len=length)))
+            elif act.startswith("tracedump"):
+                tag = act.split(":", 1)[1] if ":" in act else "manual"
+                print("tracedump " + json.dumps(c.command("tracedump", tag=tag)))
+            elif act.startswith("dump_sched"):
+                tl = act.split(":", 1)[1] if ":" in act else "600"
+                print("dump_sched " + json.dumps(c.command("dump_sched", tail=tl)))
+            elif act.startswith("dump_mesg"):
+                rest = act.split(":")[1:]
+                mq = rest[0] if len(rest) > 0 and rest[0] else "0"
+                print("dump_mesg " + json.dumps(c.command("dump_mesg", mq=mq)))
             else:
                 print(f"unknown action: {act}", file=sys.stderr)
         c.command("clear_input")

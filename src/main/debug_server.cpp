@@ -35,6 +35,32 @@ extern "C" void pkmnstadium_fontdump(void);
 extern "C" void pkmnstadium_stringdump(void);
 extern "C" void pkmnstadium_memscan(unsigned int minlen);
 
+// Live RDRAM base for raw guest-memory dumps (read_mem command). Lets a probe
+// disassemble the authoritative, relocated overlay bytes at any miss site.
+extern "C" unsigned char* recomp_runtime_get_rdram(void);
+
+// On-demand os-wrapper ring dump (diagnostics.cpp). Writes the libultra-call
+// ring to build/last_run_report.txt WITHOUT a crash — for probing a live
+// softlock: the last osRecvMesg per thread with no matching ~osRecvMesg.done is
+// a thread blocked in recv (the deadlock vertex); cross-ref osSendMesg to that
+// queue to see if anything ever signals it.
+extern "C" void pms_dump_ultra_trace(const char* tag);
+
+// Scheduler + message observability (shared ultramodern, already present at the
+// pinned sha). dump_sched/dump_mesg query these always-on rings + never-evict
+// tables to pin a softlock's deadlock vertex: which thread parked on which queue
+// (blocked_on_recv with no later wakeup) and whether anyone ever sent to it.
+extern "C" uint32_t ultramodern_running_queue_head(void);
+extern "C" void   ultramodern_sched_recent_copy(void* out, size_t cap, size_t* n_written, uint64_t* next_seq_out);
+extern "C" size_t ultramodern_sched_event_size(void);
+extern "C" size_t ultramodern_sched_thread_state_size(void);
+extern "C" void   ultramodern_sched_thread_states_copy(void* out, size_t cap, size_t* n_written);
+extern "C" void   ultramodern_get_event_queues(uint32_t* out, int count);
+extern "C" void   ultramodern_mesg_recent_copy(void* out, size_t cap, size_t* n_written, uint64_t* next_seq_out);
+extern "C" size_t ultramodern_mesg_event_size(void);
+extern "C" size_t ultramodern_mesg_qstate_size(void);
+extern "C" void   ultramodern_mesg_qstates_copy(void* out, size_t cap, size_t* n_written);
+
 // Lookup-miss capture debug hooks (librecomp overlays.cpp). Used to
 // validate the always-on capture pipeline without a real crash.
 extern "C" void recomp_debug_dump_loaded_sections(void);
@@ -320,6 +346,240 @@ static std::string handle_line(const std::string& raw_line) {
         std::snprintf(buf, sizeof(buf),
             "{\"ok\":true,\"addr\":\"0x%08X\",\"missed\":%s}",
             chosen, missed ? "true" : "false");
+        return buf;
+    }
+    if (cmd == "read_mem") {
+        // Dump raw guest RDRAM at {"addr":"0x80......","len":N} to build/
+        // memdump.bin (big-endian / un-swapped so Ghidra MIPS:BE:32 decodes it
+        // directly), and return the first 64 bytes as hex. Reusable: works for
+        // any live address — missed entry, its caller, a bad pointer site.
+        const std::string addr_s = get_str(line, "addr");
+        const uint32_t addr = (uint32_t)std::strtoul(addr_s.c_str(), nullptr, 0);
+        uint32_t len = (uint32_t)get_int(line, "len", 256);
+        if (len == 0) len = 256;
+        if (len > 0x10000u) len = 0x10000u;            // 64 KiB cap
+        unsigned char* rdram = recomp_runtime_get_rdram();
+        if (rdram == nullptr) {
+            return R"({"ok":false,"error":"rdram unavailable"})";
+        }
+        // Validate KSEG0 range [0x80000000, 0x80800000).
+        const uint32_t start = addr & 0x1FFFFFFFu;
+        if (!(addr >= 0x80000000u && addr < 0x80800000u &&
+              start <= 0x00800000u - len)) {
+            return R"({"ok":false,"error":"addr out of range"})";
+        }
+        std::string buf(len, '\0');
+        const uint32_t paddr = addr & 0x1FFFFFFFu;
+        for (uint32_t i = 0; i < len; i++) {
+            buf[i] = (char)rdram[(paddr + i) ^ 3];     // un-swap to big-endian
+        }
+        FILE* f = std::fopen("memdump.bin", "wb");
+        if (f) { std::fwrite(buf.data(), 1, len, f); std::fclose(f); }
+        // Hex preview of the first min(len,64) bytes.
+        char hex[64 * 2 + 1];
+        const uint32_t prev = len < 64 ? len : 64;
+        for (uint32_t i = 0; i < prev; i++)
+            std::snprintf(hex + i * 2, 3, "%02X", (unsigned char)buf[i]);
+        hex[prev * 2] = '\0';
+        std::string out = "{\"ok\":true,\"addr\":\"0x";
+        char ab[16]; std::snprintf(ab, sizeof(ab), "%08X", addr);
+        out += ab;
+        out += "\",\"len\":";
+        char lb[16]; std::snprintf(lb, sizeof(lb), "%u", len);
+        out += lb;
+        out += ",\"wrote\":\"build/memdump.bin\",\"hex\":\"";
+        out += hex;
+        out += "\"}";
+        return out;
+    }
+    if (cmd == "tracedump") {
+        // Dump the os-wrapper ring on demand (live softlock diagnosis) to
+        // build/last_run_report.txt. {"tag":"..."} labels the dump.
+        std::string tag = get_str(line, "tag");
+        if (tag.empty()) tag = "manual";
+        pms_dump_ultra_trace(tag.c_str());
+        return R"({"ok":true,"wrote":"build/last_run_report.txt"})";
+    }
+    if (cmd == "dump_sched") {
+        // Dump the always-on scheduler-event ring + never-evict per-thread table
+        // to build/pms_sched_dump.txt. A thread that did WAIT_BEGIN (120) with no
+        // later WAIT_RETURN is parked forever; the running thread never yielding =
+        // a starving spin loop. Mirrors ultramodern threadqueue.cpp sched_log.
+        struct SchedEvent {
+            uint64_t seq; uint64_t ms; uint32_t op; uint32_t queue;
+            uint32_t thread; uint32_t current_thread; uint32_t head_after;
+            uint32_t next_after; uint16_t thread_id; uint16_t current_thread_id;
+            int16_t priority; uint16_t pad;
+        };
+        if (ultramodern_sched_event_size() != sizeof(SchedEvent)) {
+            return R"({"ok":false,"error":"sched event size mismatch"})";
+        }
+        auto op_name = [](uint32_t op) -> const char* {
+            switch (op) {
+                case 1: return "INSERT"; case 2: return "POP";
+                case 3: return "REMOVE"; case 4: return "REMOVE_MISS";
+                case 100: return "SCHEDULE_RUNNING"; case 101: return "CHECK_EMPTY";
+                case 102: return "CHECK_PEEK"; case 103: return "CHECK_NO_SWAP";
+                case 104: return "CHECK_SWAP"; case 110: return "SWAP_ENTER";
+                case 111: return "SWAP_INSERT_SELF"; case 112: return "SWAP_WAIT_ENTER";
+                case 113: return "SWAP_WAIT_RETURN"; case 120: return "WAIT_BEGIN";
+                case 121: return "WAIT_RETURN"; case 122: return "RESUME_SIGNAL";
+                case 123: return "RUN_NEXT_ENTER"; case 124: return "RUN_NEXT_EMPTY";
+                case 125: return "RUN_NEXT_TARGET"; case 126: return "RUN_NEXT_WAIT_ENTER";
+                case 127: return "RUN_NEXT_WAIT_RETURN"; case 130: return "YIELD_ANY_ENTER";
+                case 131: return "YIELD_ANY_EMPTY"; case 132: return "YIELD_ANY_TARGET";
+                case 133: return "YIELD_ANY_REQUEUE_SELF"; case 134: return "YIELD_ANY_WAIT_ENTER";
+                case 135: return "YIELD_ANY_WAIT_RETURN"; default: return "?";
+            }
+        };
+        const size_t RING_CAP = 65536;
+        static SchedEvent evs[RING_CAP];
+        size_t tail = (size_t)std::strtoul(get_str(line, "tail").c_str(), nullptr, 0);
+        if (tail == 0) tail = 600;
+        size_t n = 0; uint64_t next_seq = 0;
+        ultramodern_sched_recent_copy(evs, RING_CAP, &n, &next_seq);
+        struct ThreadSum { uint32_t thread; int16_t pri; uint32_t op; uint32_t queue;
+                           uint32_t head_after; uint64_t ms; uint16_t id; uint32_t count;
+                           uint32_t mq; uint64_t mq_ms; };
+        ThreadSum sums[64]; size_t n_sums = 0;
+        uint64_t last_ms = n ? evs[n - 1].ms : 0;
+        for (size_t i = 0; i < n; i++) {
+            const SchedEvent& e = evs[i];
+            if (e.thread_id == 0 && e.thread == 0) continue;
+            size_t k = 0; for (; k < n_sums; k++) if (sums[k].id == e.thread_id) break;
+            if (k == n_sums && n_sums < 64) { n_sums++; sums[k].count = 0; sums[k].mq = 0; sums[k].mq_ms = 0; }
+            if (k < 64) {
+                sums[k].id = e.thread_id; sums[k].thread = e.thread; sums[k].pri = e.priority;
+                sums[k].op = e.op; sums[k].queue = e.queue; sums[k].head_after = e.head_after;
+                sums[k].ms = e.ms; sums[k].count++;
+                if (e.op == 1 && e.queue != 0xFFFFFFFFu && e.queue != 0) { sums[k].mq = e.queue; sums[k].mq_ms = e.ms; }
+            }
+        }
+        FILE* f = std::fopen("pms_sched_dump.txt", "w");
+        if (f) {
+            std::fprintf(f, "=== scheduler ring (next_seq=%llu, %llu events, running_queue_head=0x%08X) ===\n",
+                (unsigned long long)next_seq, (unsigned long long)n, ultramodern_running_queue_head());
+            uint32_t eq[5] = {0,0,0,0,0};
+            ultramodern_get_event_queues(eq, 5);
+            std::fprintf(f, "--- event queues: SP=0x%08X DP=0x%08X AI=0x%08X SI=0x%08X VI=0x%08X ---\n",
+                eq[0], eq[1], eq[2], eq[3], eq[4]);
+            auto eq_name = [&](uint32_t q) -> const char* {
+                if (q == 0) return ""; if (q == eq[0]) return " [SP.mq]"; if (q == eq[1]) return " [DP.mq]";
+                if (q == eq[2]) return " [AI.mq]"; if (q == eq[3]) return " [SI.mq]"; if (q == eq[4]) return " [VI.mq]";
+                return "";
+            };
+            struct ThreadState {
+                uint32_t valid; uint32_t id; uint32_t thread; int32_t priority;
+                uint32_t last_op; uint32_t last_queue; uint32_t last_head_after;
+                uint64_t last_ms; uint32_t last_mq; uint64_t last_mq_ms; uint64_t count;
+            };
+            if (ultramodern_sched_thread_state_size() == sizeof(ThreadState)) {
+                static ThreadState tss[256]; size_t nts = 0;
+                ultramodern_sched_thread_states_copy(tss, 256, &nts);
+                uint64_t now_max = 0;
+                for (size_t i = 0; i < nts; i++) if (tss[i].last_ms > now_max) now_max = tss[i].last_ms;
+                std::fprintf(f, "--- per-thread state (NEVER-EVICT, %llu threads) ---\n", (unsigned long long)nts);
+                for (size_t i = 0; i < nts; i++) {
+                    const ThreadState& s = tss[i];
+                    std::fprintf(f, "  t%-3u (0x%08X, pri=%d)  last=%-22s %lldms_ago  events=%llu  blocked_on_recv_q=0x%08X%s (%lldms_ago)\n",
+                        s.id, s.thread, s.priority, op_name(s.last_op),
+                        (long long)now_max - (long long)s.last_ms, (unsigned long long)s.count,
+                        s.last_mq, eq_name(s.last_mq),
+                        s.last_mq ? (long long)now_max - (long long)s.last_mq_ms : -1);
+                }
+            }
+            std::fprintf(f, "--- per-thread LAST event (ring window) ---\n");
+            for (size_t k = 0; k < n_sums; k++) {
+                const ThreadSum& s = sums[k];
+                std::fprintf(f, "  t%-3u (0x%08X, pri=%d)  last=%-22s  %lldms_ago  events=%u  blocked_on_recv_q=0x%08X (%lldms_ago)\n",
+                    s.id, s.thread, s.pri, op_name(s.op), (long long)last_ms - (long long)s.ms, s.count,
+                    s.mq, s.mq ? (long long)last_ms - (long long)s.mq_ms : -1);
+            }
+            std::fprintf(f, "--- last %llu raw events ---\n", (unsigned long long)(n < tail ? n : tail));
+            size_t start = n > tail ? n - tail : 0;
+            for (size_t i = start; i < n; i++) {
+                const SchedEvent& e = evs[i];
+                std::fprintf(f, "  seq=%llu  +%lldms  cur=t%u  %-22s  thr=t%u(0x%08X,pri=%d)  queue=0x%08X  head_after=0x%08X\n",
+                    (unsigned long long)e.seq, (long long)e.ms - (long long)last_ms, e.current_thread_id,
+                    op_name(e.op), e.thread_id, e.thread, e.priority, e.queue, e.head_after);
+            }
+            std::fclose(f);
+        }
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+            "{\"ok\":true,\"wrote\":\"build/pms_sched_dump.txt\",\"events\":%llu,\"threads\":%llu,\"next_seq\":%llu}",
+            (unsigned long long)n, (unsigned long long)n_sums, (unsigned long long)next_seq);
+        return buf;
+    }
+    if (cmd == "dump_mesg") {
+        // Dump the always-on message-event ring + never-evict per-queue table to
+        // build/pms_mesg_dump.txt. {"mq":"0x..."} filters to one queue (a parked
+        // thread's reply queue) to see if a wakeup send was ever made/dropped.
+        struct MesgEvent {
+            uint64_t seq; uint64_t ms; uint32_t mq; uint32_t msg; uint32_t thread;
+            uint16_t thread_id; uint16_t valid_before; uint16_t valid_after;
+            uint8_t op; uint8_t block; uint8_t game_thread; uint8_t pad; uint16_t reserved;
+        };
+        if (ultramodern_mesg_event_size() != sizeof(MesgEvent)) {
+            return R"({"ok":false,"error":"mesg event size mismatch"})";
+        }
+        uint32_t filt = (uint32_t)std::strtoul(get_str(line, "mq").c_str(), nullptr, 0);
+        size_t tail = (size_t)std::strtoul(get_str(line, "tail").c_str(), nullptr, 0);
+        if (tail == 0) tail = 400;
+        auto mop = [](uint8_t op) -> const char* {
+            switch (op) {
+                case 1: return "SEND_GAME"; case 2: return "SEND_EXTERNAL"; case 3: return "RECV_ENTER";
+                case 4: return "RECV_BLOCK"; case 5: return "RECV_RETURN_OK"; case 6: return "EXT_DEQ_OK";
+                case 7: return "EXT_DEQ_FULL"; case 8: return "DO_SEND_BLOCK"; default: return "?";
+            }
+        };
+        const size_t RING_CAP = 65536;
+        static MesgEvent mevs[RING_CAP];
+        size_t n = 0; uint64_t next_seq = 0;
+        ultramodern_mesg_recent_copy(mevs, RING_CAP, &n, &next_seq);
+        FILE* f = std::fopen("pms_mesg_dump.txt", "w");
+        size_t shown = 0, full_drops = 0;
+        if (f) {
+            uint64_t last_ms = n ? mevs[n - 1].ms : 0;
+            std::fprintf(f, "=== mesg ring (next_seq=%llu, %llu in ring, filter_mq=0x%08X) ===\n",
+                (unsigned long long)next_seq, (unsigned long long)n, filt);
+            for (size_t i = 0; i < n; i++) if (mevs[i].op == 7) full_drops++;
+            std::fprintf(f, "EXT_DEQ_FULL (re-queued/near-drop) total in window: %llu\n", (unsigned long long)full_drops);
+            struct QState { uint32_t queue; uint32_t count; MesgEvent last[4]; };
+            if (ultramodern_mesg_qstate_size() == sizeof(QState)) {
+                static QState qs[1024]; size_t nq = 0;
+                ultramodern_mesg_qstates_copy(qs, 1024, &nq);
+                std::fprintf(f, "--- per-queue last events (NEVER-EVICT, %llu queues%s) ---\n",
+                    (unsigned long long)nq, filt ? ", FILTERED" : "");
+                for (size_t i = 0; i < nq; i++) {
+                    if (filt != 0 && qs[i].queue != filt) continue;
+                    std::fprintf(f, "  queue=0x%08X (%u events):\n", qs[i].queue, qs[i].count);
+                    uint32_t cnt = qs[i].count; uint32_t shown_n = cnt < 4 ? cnt : 4;
+                    for (uint32_t k = 0; k < shown_n; k++) {
+                        uint32_t slot = (cnt - shown_n + k) & 3;
+                        const MesgEvent& e = qs[i].last[slot];
+                        std::fprintf(f, "      t%u %-14s msg=0x%08X valid %u->%u %s%s\n",
+                            e.thread_id, mop(e.op), e.msg, e.valid_before, e.valid_after,
+                            e.block ? "BLOCK" : "NOBLOCK", e.game_thread ? " game" : " host");
+                    }
+                }
+            }
+            size_t start = (n > tail && filt == 0) ? n - tail : 0;
+            for (size_t i = start; i < n; i++) {
+                const MesgEvent& e = mevs[i];
+                if (filt != 0 && e.mq != filt) continue;
+                std::fprintf(f, "  +%lldms t%u %-14s mq=0x%08X msg=0x%08X valid %u->%u %s%s\n",
+                    (long long)e.ms - (long long)last_ms, e.thread_id, mop(e.op), e.mq, e.msg,
+                    e.valid_before, e.valid_after, e.block ? "BLOCK" : "NOBLOCK",
+                    e.game_thread ? " game" : " host");
+                shown++;
+            }
+            std::fclose(f);
+        }
+        char buf[224];
+        std::snprintf(buf, sizeof(buf),
+            "{\"ok\":true,\"wrote\":\"build/pms_mesg_dump.txt\",\"in_ring\":%llu,\"shown\":%llu,\"ext_deq_full\":%llu,\"next_seq\":%llu}",
+            (unsigned long long)n, (unsigned long long)shown, (unsigned long long)full_drops, (unsigned long long)next_seq);
         return buf;
     }
     if (cmd == "quit") {
