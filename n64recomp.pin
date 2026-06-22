@@ -6,25 +6,25 @@
 # fork that this tree is known to build and boot against, so a checkout
 # is reproducible.
 #
-# rt64 and N64Recomp are pinned on `main`; N64ModernRuntime is on the
-# work/universal-transfer-pak branch while the GB-Tower / Transfer Pak
-# arc is in progress (not yet promoted to main). Bumped 2026-06-22: the
-# runtime gained the Transfer Pak GB-Pak status fix (settle reset_state=2
-# on cart-enable so the GB-Pak SRAM self-test sees RSTB_DETECTION set +
-# RSTB_STATUS clear), which stops GB Tower rejecting valid carts as
-# "save data is corrupt" and lets it reach the GB emulator boot, plus the
-# always-on gbcart ring thread/timing/MBC1 attribution and the env-gated
-# PSR_GBSELFTEST / PSR_JOYBUS_TRACE diagnostics. The 2026-06-21 dispatch-
-# entry REJECT fix + PSR_INTERP_DISCOVERY sweep are still included (they
-# are ancestors of this tip). rt64 is unchanged from the 2026-06-18 PRESS
-# START (#5) bump. To roll forward: bump the sha, rebuild, re-verify boot.
+# All three forks are pinned on `main`. Promoted 2026-06-22 for the first
+# (experimental) PMS-J release. N64ModernRuntime gained: the Transfer Pak
+# GB-Pak status fix (settle reset_state=2 on cart-enable so the GB-Pak SRAM
+# self-test sees RSTB_DETECTION set + RSTB_STATUS clear); the reliable/
+# coalescible RCP hardware-event delivery fix (post_rcp_event — VI retrace is
+# coalescible/droppable, SP/DP/SI/AI completions are reliable/never-lost) that
+# stops a 60Hz VI flood on a shared interrupt queue from starving the gfx
+# task-completions and freezing the boot at the N64 logo; and the depth-64
+# never-evict mesg ring + PSR_GBSELFTEST/PSR_JOYBUS_TRACE diagnostics. The
+# 2026-06-21 dispatch-entry REJECT fix + PSR_INTERP_DISCOVERY sweep are
+# ancestors of this tip. rt64 unchanged from the 2026-06-18 PRESS START (#5)
+# bump. To roll forward: bump the sha, rebuild, re-verify boot.
 
 # ── lib/N64ModernRuntime — mstan/N64ModernRuntime ──────────────────
 # The runtime that stands in for the N64 OS. Carries the cooperative-
 # scheduler preemption fix (RECOMP_LOOP_CHECKPOINT drain/yield) and the
 # always-on ultra-trace ring used for PMS boot diagnosis. Embeds
 # N64Recomp as a git submodule at N64ModernRuntime/N64Recomp.
-n64modernruntime_branch = work/universal-transfer-pak
+n64modernruntime_branch = main
 n64modernruntime_sha    = d9b5f81e1c4889bb97ac237505913236fc5228a4
 
 # ── (submodule) N64Recomp — mstan/N64Recomp ────────────────────────
