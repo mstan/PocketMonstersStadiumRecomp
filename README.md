@@ -15,9 +15,12 @@ US *Pokémon Stadium* recomp) and shares the same companion forks:
 - [N64ModernRuntime](https://github.com/mstan/N64ModernRuntime) — the runtime that stands in for the N64's operating system
 - [rt64](https://github.com/mstan/rt64) — the graphics renderer
 
-All three track the `work/pocket-monsters-stadium` branch; the exact commit
-this tree builds and boots against is recorded in
-[`n64recomp.pin`](n64recomp.pin).
+All three track the `main` branch; the exact commit this tree builds and
+boots against is recorded in [`n64recomp.pin`](n64recomp.pin).
+
+> **Releases:** an experimental Windows build is published under
+> [Releases](../../releases) (**v0.0.1**, very early — see the caveats there).
+> No ROM is bundled; you supply your own Pocket Monsters Stadium (J) `.z64`.
 
 > **Why a separate repo from PokemonStadiumRecomp?** PMS-J is the same engine
 > family as US Pokémon Stadium (near-identical boot layout — `Idle_ThreadEntry`
@@ -33,16 +36,20 @@ audio engine, resource server), builds graphics tasks, and renders the
 iconic terminal / Poké Ball main-menu scene — including the Japanese
 "no cartridge inserted" prompt and the オプション (Options) button.
 
-This is a large leap from the original black screen. The bring-up trail —
-the boot deadlock (scheduler starvation on loop back-edges), truncated
-delay-slot corruption, the libultra identifications, and the resource-server
-layer — is documented in [`FINDINGS.md`](FINDINGS.md).
+It now boots through the title (the PRESS START / njpeg background renders),
+the cart-select screen, the main menu, and into the 3D battle UI, with the
+runtime English-translation layer applied. The bring-up trail — the boot
+deadlock (scheduler starvation on loop back-edges), truncated delay-slot
+corruption, the libultra identifications, and the resource-server layer — is
+documented in [`FINDINGS.md`](FINDINGS.md).
 
-**Known issues (cosmetic / in progress):**
-- Menu pointer-hand sprite lacks transparency — renders inside a white box.
-- The press-start main-menu background does not render.
-- Deeper play paths still hit unregistered-overlay lookup misses
-  (`get_function` trampoline aborts) before some screens.
+**Very experimental — expect bugs.** Known issues (in progress):
+- **GB mode / GB Tower does not work properly** — it currently mis-flags
+  valid Game Boy save data as "corrupt" and won't load imported Pokémon.
+- The English translation is **incomplete** — many strings are still Japanese,
+  and some translated text may be wrong or mis-sized.
+- Some UI sprites (arrow/hand) still have transparency artifacts, and deeper
+  play paths can hit crashes/hangs.
 
 ## English translation patch
 

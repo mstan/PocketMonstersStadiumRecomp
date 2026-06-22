@@ -62,6 +62,9 @@ launcher.cfg
 _*.png
 _*.pid
 _*.out
+_*.wav
+_*.txt
+_*.json
 _tmp_*
 *.bak
 *.bak-*

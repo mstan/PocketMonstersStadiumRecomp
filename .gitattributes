@@ -7,10 +7,13 @@
 *.z64 binary
 *.n64 binary
 *.v64 binary
+*.gb binary
+*.gbc binary
 *.bin binary
 *.png binary
 *.jpg binary
 *.gif binary
+*.ttf binary
 *.zip binary
 *.gpr binary
 *.gar binary
