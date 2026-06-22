@@ -165,6 +165,9 @@ def main(argv) -> int:
                 rest = act.split(":")[1:]
                 mq = rest[0] if len(rest) > 0 and rest[0] else "0"
                 print("dump_mesg " + json.dumps(c.command("dump_mesg", mq=mq)))
+            elif act.startswith("gbcart_dump"):
+                tl = act.split(":", 1)[1] if ":" in act else "800"
+                print("gbcart_dump " + json.dumps(c.command("gbcart_dump", tail=str(tl))))
             else:
                 print(f"unknown action: {act}", file=sys.stderr)
         c.command("clear_input")

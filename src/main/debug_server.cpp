@@ -29,6 +29,8 @@
 
 #include "debug_server.h"
 
+#include <librecomp/gbcart.hpp>  // Transfer Pak block-I/O ring dump (gbcart_dump)
+
 // Text-draw discovery census dumper + font-sheet dumper (diagnostics.cpp).
 extern "C" void pkmnstadium_textdraw_dump(void);
 extern "C" void pkmnstadium_fontdump(void);
@@ -399,6 +401,16 @@ static std::string handle_line(const std::string& raw_line) {
         if (tag.empty()) tag = "manual";
         pms_dump_ultra_trace(tag.c_str());
         return R"({"ok":true,"wrote":"build/last_run_report.txt"})";
+    }
+    if (cmd == "gbcart_dump") {
+        // Dump the always-on Transfer Pak block-I/O ring to build/gbcart_ring.txt:
+        // which ROM banks/addresses the cart access walked + the last N entries.
+        // Pins where GB Tower's full-cart read stalls (vs registration's targeted
+        // reads), without perturbing boot the way per-event stderr does.
+        int tail = (int)std::strtol(get_str(line, "tail").c_str(), nullptr, 0);
+        if (tail <= 0) tail = 800;
+        librecomp::gbcart::ring_dump("build/gbcart_ring.txt", tail);
+        return R"({"ok":true,"wrote":"build/gbcart_ring.txt"})";
     }
     if (cmd == "dump_sched") {
         // Dump the always-on scheduler-event ring + never-evict per-thread table

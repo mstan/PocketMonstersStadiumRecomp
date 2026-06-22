@@ -1253,5 +1253,6 @@
   { "src_hex": "a5a8a5eaa5a2a3b2", "src_jp": "エリア２", "target": "Area 2", "orig_w": 4 },
   { "src_hex": "a5a8a5eaa5a2a3b3", "src_jp": "エリア３", "target": "Area 3", "orig_w": 4 },
   { "src_hex": "a4d2a4eda4d0a1a1", "src_jp": "ひろば　", "target": "Plaza", "orig_w": 4 },
-  { "src_hex": "a5a2a5a4a5a6a5a8a5aaa4b8a4e5a4f3", "src_jp": "アイウエオじゅん", "target": "A to Z", "orig_w": 8 }
+  { "src_hex": "a5a2a5a4a5a6a5a8a5aaa4b8a4e5a4f3", "src_jp": "アイウエオじゅん", "target": "A to Z", "orig_w": 8 },
+  {"src_hex": "a5eca5dda1bca5c8a4aca4bfa4c0a4b7a4afa4caa4a4a4cea4c70aa4c4a4c5a4ada4aba4e9a4a2a4bda4d6a4b3a4c8a4cfa4c7a4ada4dea4bba4f3a1a30aa5eaa5bba5c3a5c8a4b7a4c6a1d6a4b5a4a4a4b7a4e7a4aba4e9a4cfa4b8a4e1a4eba1d70aa4f2a4a8a4e9a4f3a4c7a4afa4c0a4b5a4a4a1a3", "src_jp": "レポートがただしくないので\nつづきからあそぶことはできません。\nリセットして「さいしょからはじめる」\nをえらんでください。", "target": "The save data is corrupt, so\nyou can't continue.\nReset and select\n\"New Game\".", "orig_w": 18}
 ]
