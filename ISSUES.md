@@ -341,6 +341,43 @@ Not yet root-caused at the texture-format level.
 
 ---
 
+## #8 — Universalize the runtime text hot-swap into the engine — **OPEN (follow-up)**
+
+*Today it is PMS-J-only.* The on-the-fly English text hot-swap (content-hash a
+drawn string -> look it up in `translations.json` -> repoint the format arg so the
+game renders the replacement, with the table **hot-reloaded** on mtime change)
+lives entirely in this repo: `src/main/diagnostics.cpp`
+(`pkmnstadium_text_xlate` / `pkmnstadium_textdraw_probe` / the `g_xlate` KV +
+`load_translations_locked` / `maybe_reload_translations`) wired in via
+`include/trace.h` on `trace_mode = true`. No part of it is in N64ModernRuntime /
+N64Recomp, so **no other game in the ecosystem can use it.**
+
+*Why it is not a clean lift.* Audited 2026-06-22: only ~20% is game-agnostic.
+- **Reusable core (-> N64ModernRuntime as e.g. `recomp::text_xlate`):**
+  `translations.json` load + mtime hot-reload; FNV/`src_hex` content-hash KV
+  lookup; per-PC interception-site registration; an ABI-parameterized
+  format-arg repoint (which GPR holds the string pointer is config, e.g. r6);
+  the always-on string capture/census (`stringdump.log`).
+- **Game-specific (must stay as game-provided callbacks):** EUC-JP decode; the
+  fit-aware glyph **self-renderer** (re-renders English through the game's own
+  font + glyph-draw routine, with spacing/fit tuning); the draw PC(s)
+  (`0x8001A944` + the class-1/2 siblings) and their r4/r5/r6/r7 conventions;
+  the disjoint scratch-slot management (`swap_scratch`).
+
+*Proposed.* Extract the reusable core into N64ModernRuntime as a general,
+game-agnostic facility: a game registers its draw-site PC(s) + the fmt-arg GPR
+index + decode/render callbacks + the translations path; the engine owns the
+KV, hot-reload, hashing, repoint, and capture. PMS-J becomes the **first
+consumer**; future N64 recomps (and PokemonStadiumRecomp) then get the hot-swap
+translation layer for free. List it as a new engine feature when landed.
+
+*Status.* Investigated + scoped 2026-06-22. **Deferred by decision** (do the
+shared-engine refactor deliberately, not mid-v0.0.1-release-cleanup, to avoid
+regressing PMS's carefully-tuned rendering). Relates to the `trace_mode`
+decoupling note below and #4 (translation settings UI).
+
+---
+
 ## Release prep (tracked, not blocking dev)
 
 - **trace_mode decoupling.** The translation hook rides `trace_mode =
