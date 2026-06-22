@@ -1,5 +1,20 @@
 # PocketMonstersStadiumRecomp
 
+> # ⚠️ HEAVILY EXPERIMENTAL — EXPECT BUGS ⚠️
+> A very early, largely untested static recompilation of **Pocket Monsters
+> Stadium (Japan)** with a **work-in-progress English translation**. Treat
+> everything as broken until proven otherwise.
+>
+> - **GB mode / GB Tower does NOT work** — it falsely flags valid Game Boy
+>   save data as *"corrupt"* and refuses to load it.
+> - **Pokémon registration appears to work**; GB Tower play does not.
+> - **Pokémon Green is the only tested cartridge.** Other-language / other
+>   Game Boy cartridges are untested and may not work.
+> - The English translation is **incomplete** — expect missing or wrong text.
+>
+> An experimental Windows build is under [Releases](../../releases) (**v0.0.1**).
+> No ROM is bundled — bring your own Pocket Monsters Stadium (J) `.z64`.
+
 Static recompilation of **Pocket Monsters Stadium (Japan)** — the original
 Japanese release that predates the international *Pokémon Stadium* — to a
 native PC program.
@@ -17,10 +32,6 @@ US *Pokémon Stadium* recomp) and shares the same companion forks:
 
 All three track the `main` branch; the exact commit this tree builds and
 boots against is recorded in [`n64recomp.pin`](n64recomp.pin).
-
-> **Releases:** an experimental Windows build is published under
-> [Releases](../../releases) (**v0.0.1**, very early — see the caveats there).
-> No ROM is bundled; you supply your own Pocket Monsters Stadium (J) `.z64`.
 
 > **Why a separate repo from PokemonStadiumRecomp?** PMS-J is the same engine
 > family as US Pokémon Stadium (near-identical boot layout — `Idle_ThreadEntry`
@@ -44,8 +55,12 @@ corruption, the libultra identifications, and the resource-server layer — is
 documented in [`FINDINGS.md`](FINDINGS.md).
 
 **Very experimental — expect bugs.** Known issues (in progress):
-- **GB mode / GB Tower does not work properly** — it currently mis-flags
-  valid Game Boy save data as "corrupt" and won't load imported Pokémon.
+- **GB mode / GB Tower does not work** — it currently mis-flags valid Game Boy
+  save data as "corrupt" and won't load imported Pokémon.
+- **Pokémon registration appears to work** (importing your party into Stadium);
+  it is GB Tower *play* that does not.
+- **Pokémon Green is the only tested cartridge.** Other-language and other Game
+  Boy cartridges are untested and may not work.
 - The English translation is **incomplete** — many strings are still Japanese,
   and some translated text may be wrong or mis-sized.
 - Some UI sprites (arrow/hand) still have transparency artifacts, and deeper
