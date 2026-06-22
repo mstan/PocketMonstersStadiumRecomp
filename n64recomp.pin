@@ -25,7 +25,7 @@
 # always-on ultra-trace ring used for PMS boot diagnosis. Embeds
 # N64Recomp as a git submodule at N64ModernRuntime/N64Recomp.
 n64modernruntime_branch = work/universal-transfer-pak
-n64modernruntime_sha    = 37c53d2aba25c4a411daddb82fdaa2bdde12784a
+n64modernruntime_sha    = d9b5f81e1c4889bb97ac237505913236fc5228a4
 
 # ── (submodule) N64Recomp — mstan/N64Recomp ────────────────────────
 # The static recompiler. Unconditional loop-back-edge checkpoints +

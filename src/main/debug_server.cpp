@@ -542,7 +542,8 @@ static std::string handle_line(const std::string& raw_line) {
             switch (op) {
                 case 1: return "SEND_GAME"; case 2: return "SEND_EXTERNAL"; case 3: return "RECV_ENTER";
                 case 4: return "RECV_BLOCK"; case 5: return "RECV_RETURN_OK"; case 6: return "EXT_DEQ_OK";
-                case 7: return "EXT_DEQ_FULL"; case 8: return "DO_SEND_BLOCK"; default: return "?";
+                case 7: return "EXT_DEQ_FULL"; case 8: return "DO_SEND_BLOCK";
+                case 9: return "EXT_DEQ_DROP"; default: return "?";
             }
         };
         const size_t RING_CAP = 65536;
