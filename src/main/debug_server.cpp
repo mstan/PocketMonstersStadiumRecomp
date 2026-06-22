@@ -557,20 +557,24 @@ static std::string handle_line(const std::string& raw_line) {
                 (unsigned long long)next_seq, (unsigned long long)n, filt);
             for (size_t i = 0; i < n; i++) if (mevs[i].op == 7) full_drops++;
             std::fprintf(f, "EXT_DEQ_FULL (re-queued/near-drop) total in window: %llu\n", (unsigned long long)full_drops);
-            struct QState { uint32_t queue; uint32_t count; MesgEvent last[4]; };
+            // QEVENTS MUST match N64ModernRuntime mesgqueue.cpp's QState (the
+            // qstate_size guard below silently skips the table on a mismatch).
+            constexpr uint32_t QEVENTS = 64;
+            struct QState { uint32_t queue; uint32_t count; MesgEvent last[QEVENTS]; };
             if (ultramodern_mesg_qstate_size() == sizeof(QState)) {
                 static QState qs[1024]; size_t nq = 0;
                 ultramodern_mesg_qstates_copy(qs, 1024, &nq);
-                std::fprintf(f, "--- per-queue last events (NEVER-EVICT, %llu queues%s) ---\n",
-                    (unsigned long long)nq, filt ? ", FILTERED" : "");
+                std::fprintf(f, "--- per-queue last events (NEVER-EVICT depth=%u, %llu queues%s; seq for cross-queue ordering) ---\n",
+                    QEVENTS, (unsigned long long)nq, filt ? ", FILTERED" : "");
                 for (size_t i = 0; i < nq; i++) {
                     if (filt != 0 && qs[i].queue != filt) continue;
                     std::fprintf(f, "  queue=0x%08X (%u events):\n", qs[i].queue, qs[i].count);
-                    uint32_t cnt = qs[i].count; uint32_t shown_n = cnt < 4 ? cnt : 4;
+                    uint32_t cnt = qs[i].count; uint32_t shown_n = cnt < QEVENTS ? cnt : QEVENTS;
                     for (uint32_t k = 0; k < shown_n; k++) {
-                        uint32_t slot = (cnt - shown_n + k) & 3;
+                        uint32_t slot = (cnt - shown_n + k) & (QEVENTS - 1);
                         const MesgEvent& e = qs[i].last[slot];
-                        std::fprintf(f, "      t%u %-14s msg=0x%08X valid %u->%u %s%s\n",
+                        std::fprintf(f, "      seq=%llu ms=%llu t%u %-14s msg=0x%08X valid %u->%u %s%s\n",
+                            (unsigned long long)e.seq, (unsigned long long)e.ms,
                             e.thread_id, mop(e.op), e.msg, e.valid_before, e.valid_after,
                             e.block ? "BLOCK" : "NOBLOCK", e.game_thread ? " game" : " host");
                     }
