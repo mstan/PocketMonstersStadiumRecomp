@@ -7,8 +7,9 @@
  * works inside Pokemon Stadium Recomp BEFORE the full "SS Anne" launcher is
  * built on top of it (Phase 1).
  *
- * This deliberately bypasses recompui's ui_state.cpp menu machinery (which is
- * still Zelda64-specific: mod menu, config tabs, launcher contexts). We reuse
+ * This deliberately bypasses recompui's ui_state.cpp menu machinery (which
+ * carries machinery this project doesn't use: mod menu, config tabs, launcher
+ * contexts). We reuse
  * only the framework-level, game-agnostic pieces:
  *   - recompui::RmlRenderInterface_RT64  (src/ui/ui_renderer.cpp)
  *   - SystemInterface_SDL                (lib/RmlUi/Backends)

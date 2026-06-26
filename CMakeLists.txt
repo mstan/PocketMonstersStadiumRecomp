@@ -69,8 +69,7 @@ add_compile_definitions(HLSL_CPU)
 add_subdirectory(${CMAKE_SOURCE_DIR}/lib/rt64 ${CMAKE_BINARY_DIR}/rt64)
 
 # ---- RmlUi + lunasvg (UI framework for the SS Anne launcher) ----------------
-# Vendored forks under lib/ (version-matched to the rt64/N64MR fork lineage,
-# Zelda64Recomp@ab677e7). lunasvg first so RmlUi's SVG plugin links it statically.
+# Vendored under lib/. lunasvg first so RmlUi's SVG plugin links it statically.
 set(BUILD_SHARED_LIBS OFF)
 set(LUNASVG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(${CMAKE_SOURCE_DIR}/lib/lunasvg)

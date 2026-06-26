@@ -1,10 +1,9 @@
 /*
  * pms_render.h — RT64-backed RendererContext for PocketMonstersStadiumRecomp.
  *
- * Mirrors PokemonStadiumRecomp's pokestadium_render.h (which is itself
- * adapted from Zelda64Recomp's zelda_render.h). No texture-pack / mod-loader
- * machinery and no recompui dependency — just the RT64 context the runtime
- * needs to present frames.
+ * Mirrors PokemonStadiumRecomp's pokestadium_render.h. No texture-pack /
+ * mod-loader machinery and no recompui dependency — just the RT64 context the
+ * runtime needs to present frames.
  */
 
 #ifndef PMS_RENDER_H

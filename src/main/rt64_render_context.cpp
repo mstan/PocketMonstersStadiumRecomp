@@ -1,8 +1,8 @@
 /*
  * rt64_render_context.cpp — PocketMonstersStadiumRecomp's RT64 wrapper.
  *
- * Mirrors PokemonStadiumRecomp's rt64_render_context.cpp (adapted from
- * Zelda64Recomp@ab677e7), stripped of the SS Anne RmlUi overlay seam and the
+ * Mirrors PokemonStadiumRecomp's rt64_render_context.cpp, stripped of the
+ * SS Anne RmlUi overlay seam and the
  * TCP debug-server counters — this is the minimal boot-to-menu renderer. The
  * RT64 application setup and the hardcoded supersampling/MSAA config (verified
  * good on the sibling PSR project) are kept verbatim; env knobs are renamed to

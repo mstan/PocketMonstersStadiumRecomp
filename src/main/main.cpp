@@ -2,7 +2,7 @@
  * main.cpp — PocketMonstersStadiumRecomp runner entry point.
  *
  * Minimal-but-complete boot-to-menu runner, modeled on PokemonStadiumRecomp's
- * main.cpp (itself adapted from Zelda64Recomp). Deliberately omits the
+ * main.cpp. Deliberately omits the
  * post-boot subsystems PSR accreted — SS Anne launcher, Transfer Pak, GB Tower
  * microcodes, Ares oracle, TCP debug server, audio diagnostic rings — none of
  * which are on the first-boot critical path. Everything kept is implemented for
