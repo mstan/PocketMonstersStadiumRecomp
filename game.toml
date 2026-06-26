@@ -88,6 +88,182 @@ force_function_vrams = [
     # Round 3: surfaced by the one-run discovery sweep (PSR_INTERP_DISCOVERY)
     # once rounds 1-2 let GB-init create + run its emulator threads.
     0x81119964,  # GB handler (runtime 0x80137C64, off 0x19964)
+    # Round 4 (2026-06-24): GB-core interior entries that ran INTERPRETED during a
+    # real Transfer-Pak cart load (Midori). The GB-emulator's own cart/save ingest
+    # (GB-core init link 0x811008dc) dispatches these via computed jalr; unseeded,
+    # they fell to the self-heal interpreter (16,397 interp_runs / runtime_captures
+    # .json: 11 code-entry misses incl. the hot fetch-decode loop at 0x81118A38
+    # x8194 and 0x8111A364 x8192). US Pokemon Stadium's GB-core is fully native;
+    # this is why PMS-J GB-mode diverged (wrong "save corrupt" verdict -> fade to
+    # black). LINK = section-1 base 0x81100000 + offset_in_section. (Excludes the
+    # pointer-site miss 0x8111A474 = a HI16 reloc VALUE, not a code entry.)
+    # See memory project_pmsj_transferpak_savecorrupt_2026_06_24.md.
+    0x81118930,  # GB-core (runtime 0x80136C30, off 0x18930)
+    0x81118A38,  # GB-core fetch-decode loop (runtime 0x80136D38, off 0x18A38, HOT ~8194)
+    0x81118B18,  # GB-core (runtime 0x80136E18, off 0x18B18)
+    0x81118C90,  # GB-core (runtime 0x80136F90, off 0x18C90)
+    0x81118CD8,  # GB-core (runtime 0x80136FD8, off 0x18CD8)
+    0x811190B8,  # GB-core (runtime 0x801373B8, off 0x190B8)
+    0x81119500,  # GB-core (runtime 0x80137800, off 0x19500)
+    0x8111A364,  # GB-core step loop (runtime 0x80138664, off 0x1A364, HOT ~8192)
+    0x8111A440,  # GB-core (runtime 0x80138740, off 0x1A440)
+    0x8111AEC8,  # GB-core (runtime 0x801391C8, off 0x1AEC8; surfaced after 0x8111B8F0)
+    0x8111B8F0,  # GB-core (runtime 0x80139BF0, off 0x1B8F0; rule out lone lookup miss)
+    0x8111B960,  # GB-core (runtime 0x80139C60, off 0x1B960; surfaced after 0x8111B8F0)
+    0x8111B980,  # GB-core (runtime 0x80139C80, off 0x1B980)
+    # Round 5 (2026-06-24): GB-core computed entries surfaced after Round 4.
+    # Converted from build/build/coverage/runtime_captures.json runtime
+    # addresses using section-1 link base 0x81100000 + offset_in_section.
+    0x811188F0,  # GB-core (runtime 0x80136BF0, off 0x188F0; hit_count=2)
+    0x81118A08,  # GB-core (runtime 0x80136D08, off 0x18A08; hit_count=200)
+    0x81118A84,  # GB-core (runtime 0x80136D84, off 0x18A84; hit_count=56)
+    0x81118AA0,  # GB-core (runtime 0x80136DA0, off 0x18AA0; hit_count=200)
+    0x81118BA8,  # GB-core (runtime 0x80136EA8, off 0x18BA8; hit_count=25)
+    0x81118BB4,  # GB-core (runtime 0x80136EB4, off 0x18BB4; hit_count=392)
+    0x81118C00,  # GB-core (runtime 0x80136F00, off 0x18C00; hit_count=24)
+    0x81118CB4,  # GB-core (runtime 0x80136FB4, off 0x18CB4; hit_count=97)
+    0x81118D74,  # GB-core (runtime 0x80137074, off 0x18D74; hit_count=2)
+    0x81118F2C,  # GB-core (runtime 0x8013722C, off 0x18F2C; hit_count=56)
+    0x8111904C,  # GB-core (runtime 0x8013734C, off 0x1904C; hit_count=768)
+    0x81119090,  # GB-core (runtime 0x80137390, off 0x19090; hit_count=2)
+    0x811190E8,  # GB-core (runtime 0x801373E8, off 0x190E8; hit_count=25)
+    0x811191EC,  # GB-core (runtime 0x801374EC, off 0x191EC; hit_count=48)
+    0x81119228,  # GB-core (runtime 0x80137528, off 0x19228; hit_count=48)
+    0x81119258,  # GB-core (runtime 0x80137558, off 0x19258; hit_count=1)
+    0x811192B8,  # GB-core (runtime 0x801375B8, off 0x192B8; hit_count=1)
+    0x81119AC0,  # GB-core (runtime 0x80137DC0, off 0x19AC0; hit_count=48)
+    0x81119B18,  # GB-core (runtime 0x80137E18, off 0x19B18; hit_count=96)
+    0x81119C4C,  # GB-core (runtime 0x80137F4C, off 0x19C4C; hit_count=384)
+    0x81119ED8,  # GB-core (runtime 0x801381D8, off 0x19ED8; hit_count=96)
+    0x8111A1C4,  # GB-core (runtime 0x801384C4, off 0x1A1C4; hit_count=384)
+    0x8111A4E0,  # GB-core (runtime 0x801387E0, off 0x1A4E0; hit_count=1)
+    0x8111BB94,  # GB-core (runtime 0x80139E94, off 0x1BB94; hit_count=1)
+    0x8111BBA8,  # GB-core (runtime 0x80139EA8, off 0x1BBA8; guarded handoff red-X run)
+    # Round 6 (2026-06-24): GB-core entries surfaced after Round 5 reached
+    # black-screen GB mode instead of the red-X. 0x8111A540 was the hot path.
+    0x81118ACC,  # GB-core (runtime 0x80136DCC, off 0x18ACC; hit_count=1)
+    0x81118AF0,  # GB-core (runtime 0x80136DF0, off 0x18AF0; hit_count=132)
+    0x81118BC0,  # GB-core (runtime 0x80136EC0, off 0x18BC0; hit_count=132)
+    0x81118BCC,  # GB-core (runtime 0x80136ECC, off 0x18BCC; hit_count=264)
+    0x81118CFC,  # GB-core (runtime 0x80136FFC, off 0x18CFC; hit_count=1)
+    0x81118D20,  # GB-core (runtime 0x80137020, off 0x18D20; hit_count=395)
+    0x811191C8,  # GB-core (runtime 0x801374C8, off 0x191C8; hit_count=1)
+    0x8111936C,  # GB-core (runtime 0x8013766C, off 0x1936C; hit_count=132)
+    0x811193A8,  # GB-core (runtime 0x801376A8, off 0x193A8; hit_count=48)
+    0x8111965C,  # GB-core (runtime 0x8013795C, off 0x1965C; hit_count=1)
+    0x81119AA4,  # GB-core (runtime 0x80137DA4, off 0x19AA4; hit_count=48)
+    0x8111A540,  # GB-core (runtime 0x80138840, off 0x1A540; HOT hit_count=804311)
+    # Round 7 (2026-06-24): pointer-site misses that were recovered only by
+    # reject-to-interpreter after Round 6. These are intentional entry points
+    # even though the capture classifier sees relocations at the same offsets.
+    0x8111978C,  # GB-core pointer-site entry (runtime 0x80137A8C, off 0x1978C; hit_count=1)
+    0x8111A474,  # GB-core pointer-site entry (runtime 0x80138774, off 0x1A474; hit_count=2)
+    0x8111A910,  # GB-core pointer-site entry (runtime 0x80138C10, off 0x1A910; hit_count=768)
+    # Round 8 (2026-06-24): surfaced only after the boot-ROM handoff gate was
+    # forced early enough for the cart window to unmap before the 0x0100 loop.
+    0x811188A8,  # GB-core (runtime 0x80136BA8, off 0x188A8; early-gate run)
+    0x81119D54,  # GB-core (runtime 0x80138054, off 0x19D54; early-gate run)
+    0x8111A57C,  # GB-core (runtime 0x8013887C, off 0x1A57C; early-gate run)
+    0x8111C43C,  # GB-core (runtime 0x8013A73C, off 0x1C43C; early-gate run)
+    # Round 9 (2026-06-25): surfaced after restoring the staged cart header and
+    # entering Midori at 0x0100. Unseeded entries coincide with PC/SP collapse.
+    0x8111A30C,  # GB-core I/O write helper (runtime 0x8013860C, off 0x1A30C)
+    0x8111C468,  # GB-core computed entry (runtime 0x8013A768, off 0x1C468)
+    # Round 10 (2026-06-25): surfaced after Round 9 reached Midori init at
+    # 0x09DA/0x0167 and then black-screened in a PC=0000/RST loop.
+    0x811188B0,  # GB-core (runtime 0x80136BB0, off 0x188B0; hit_count=1)
+    0x81118DA0,  # GB-core (runtime 0x801370A0, off 0x18DA0; hit_count=8192)
+    0x81118FA4,  # GB-core (runtime 0x801372A4, off 0x18FA4; hit_count=8192)
+    0x811191F8,  # GB-core (runtime 0x801374F8, off 0x191F8; hit_count=1)
+    0x81119930,  # GB-core (runtime 0x80137C30, off 0x19930; hit_count=1)
+    0x811199F8,  # GB-core pointer-site entry (runtime 0x80137CF8, off 0x199F8; hit_count=8192)
+    0x8111AF50,  # GB-core pointer-site entry (runtime 0x80139250, off 0x1AF50; hit_count=1)
+    0x8111B938,  # GB-core (runtime 0x80139C38, off 0x1B938; hit_count=1537)
+    0x8111B954,  # GB-core (runtime 0x80139C54, off 0x1B954; hit_count=2)
+    # Round 11 (2026-06-25): final GB-core miss before Round 10 returned red-X.
+    0x8111B948,  # GB-core (runtime 0x80139C48, off 0x1B948; hit_count=1)
+    # Round 12 (2026-06-25): surfaced after scoped no-boot force ran Midori
+    # through 0x0100/0x0150/0x09DA and then hit the STAT wait loop.
+    0x811191E0,  # GB-core (runtime 0x801374E0, off 0x191E0; hit_count=8319)
+    0x81119C8C,  # GB-core (runtime 0x80137F8C, off 0x19C8C; hit_count=2)
+    0x8111A214,  # GB-core (runtime 0x80138514, off 0x1A214; hit_count=2)
+    0x8111B780,  # GB-core (runtime 0x80139A80, off 0x1B780; hit_count=1)
+    # Round 13 (2026-06-25): surfaced after Round 12 reached ~105k GB steps
+    # before PC collapsed through 0x0000/0x0038/0xF080.
+    0x81118F54,  # GB-core (runtime 0x80137254, off 0x18F54; hit_count=10)
+    0x8111BBD8,  # GB-core (runtime 0x80139ED8, off 0x1BBD8; hit_count=1)
+    # Round 14 (2026-06-25): surfaced after Round 13 reached Midori's STAT
+    # wait loop at 0x0171/0x0173/0x0175 and then rejected more GB dispatch entries.
+    0x81118D44,  # GB-core (runtime 0x80137044, off 0x18D44; hit_count=2)
+    0x81118EA8,  # GB-core (runtime 0x801371A8, off 0x18EA8; hit_count=1)
+    0x81119118,  # GB-core (runtime 0x80137418, off 0x19118; hit_count=1)
+    0x81119210,  # GB-core (runtime 0x80137510, off 0x19210; hit_count=2)
+    0x81119288,  # GB-core (runtime 0x80137588, off 0x19288; hit_count=2)
+    0x8111931C,  # GB-core (runtime 0x8013761C, off 0x1931C; hit_count=1)
+    0x8111935C,  # GB-core (runtime 0x8013765C, off 0x1935C; hit_count=2)
+    0x81119390,  # GB-core (runtime 0x80137690, off 0x19390; hit_count=1)
+    0x811193D8,  # GB-core (runtime 0x801376D8, off 0x193D8; hit_count=1)
+    0x8111940C,  # GB-core (runtime 0x8013770C, off 0x1940C; hit_count=1)
+    0x81119550,  # GB-core (runtime 0x80137850, off 0x19550; hit_count=1)
+    0x81119624,  # GB-core pointer-site entry (runtime 0x80137924, off 0x19624; hit_count=1)
+    0x81119644,  # GB-core pointer-site entry (runtime 0x80137944, off 0x19644; hit_count=1)
+    0x81119B5C,  # GB-core (runtime 0x80137E5C, off 0x19B5C; hit_count=1)
+    0x81119CCC,  # GB-core (runtime 0x80137FCC, off 0x19CCC; hit_count=1)
+    0x81119DE8,  # GB-core (runtime 0x801380E8, off 0x19DE8; hit_count=1)
+    0x8111A264,  # GB-core (runtime 0x80138564, off 0x1A264; hit_count=1)
+    0x8111A2B4,  # GB-core (runtime 0x801385B4, off 0x1A2B4; hit_count=1)
+    0x8111A4D8,  # GB-core pointer-site entry (runtime 0x801387D8, off 0x1A4D8; hit_count=1)
+    0x8111A5E0,  # GB-core (runtime 0x801388E0, off 0x1A5E0; hit_count=5)
+    0x8111A640,  # GB-core (runtime 0x80138940, off 0x1A640; hit_count=1)
+    0x8111BBF0,  # GB-core (runtime 0x80139EF0, off 0x1BBF0; hit_count=1)
+    # Round 15 (2026-06-25): remaining GB-core misses after Round 14 reduced
+    # dispatch rejects to one and reached the same PC=0000/RST38 collapse.
+    0x811193F8,  # GB-core (runtime 0x801376F8, off 0x193F8; hit_count=1)
+    0x8111A094,  # GB-core (runtime 0x80138394, off 0x1A094; hit_count=1)
+    0x8111BC18,  # GB-core (runtime 0x80139F18, off 0x1BC18; hit_count=1)
+    # Round 16 (2026-06-25): surfaced after Round 15 removed the prior final
+    # three misses but still returned red-X before reaching GB title.
+    0x81118DFC,  # GB-core (runtime 0x801370FC, off 0x18DFC; hit_count=1)
+    0x8111946C,  # GB-core (runtime 0x8013776C, off 0x1946C; hit_count=1)
+    0x8111AE80,  # GB-core (runtime 0x80139180, off 0x1AE80; hit_count=1)
+    0x8111BC04,  # GB-core (runtime 0x80139F04, off 0x1BC04; hit_count=1)
+    0x8111BC44,  # GB-core (runtime 0x80139F44, off 0x1BC44; hit_count=2)
+    # Round 17 (2026-06-25): surfaced after Round 16 changed the failure from
+    # red-X to black GB-mode screen with one dispatch reject.
+    0x8111BC64,  # GB-core (runtime 0x80139F64, off 0x1BC64; hit_count=1)
+    0x8111BCAC,  # GB-core pointer-site entry (runtime 0x80139FAC, off 0x1BCAC; hit_count=1)
+    # Round 18 (2026-06-25): surfaced after Round 17 returned red-X with
+    # 128 rejects at the GB-core pointer-site and one final code entry.
+    0x8111AA08,  # GB-core pointer-site entry (runtime 0x80138D08, off 0x1AA08; hit_count=128)
+    0x8111BFBC,  # GB-core (runtime 0x8013A2BC, off 0x1BFBC; hit_count=1)
+    # Round 19 (2026-06-25): surfaced after Round 18 reached active Midori code
+    # around pc=0x671C/0xFF80, then crashed via fallback into an outside-loaded
+    # audio output buffer. These are only section-1 GB-core entries; excludes
+    # 0x803DA280/fragment noise.
+    0x81118DE0,  # GB-core (runtime 0x801370E0, off 0x18DE0; hit_count=1)
+    0x81118EC4,  # GB-core (runtime 0x801371C4, off 0x18EC4; hit_count=32)
+    0x81118FC0,  # GB-core (runtime 0x801372C0, off 0x18FC0; hit_count=5709)
+    0x81118FFC,  # GB-core pointer-site entry (runtime 0x801372FC, off 0x18FFC; hit_count=1)
+    0x811191D4,  # GB-core (runtime 0x801374D4, off 0x191D4; hit_count=32)
+    0x811196D4,  # GB-core pointer-site entry (runtime 0x801379D4, off 0x196D4; hit_count=4)
+    0x81119834,  # GB-core pointer-site entry (runtime 0x80137B34, off 0x19834; hit_count=4)
+    0x81119A08,  # GB-core pointer-site entry (runtime 0x80137D08, off 0x19A08; hit_count=5708)
+    0x81119B0C,  # GB-core (runtime 0x80137E0C, off 0x19B0C; hit_count=12)
+    0x81119D14,  # GB-core (runtime 0x80138014, off 0x19D14; hit_count=4)
+    0x8111AE14,  # GB-core (runtime 0x80139114, off 0x1AE14; hit_count=8)
+    0x8111C494,  # GB-core (runtime 0x8013A794, off 0x1C494; hit_count=4)
+    # Round 20 (2026-06-25): surfaced on the first no-force run after Round 19.
+    # Natural GB boot still returned the generic corrupt-save UI; these are the
+    # remaining section-1 GB-core entries from that run.
+    0x81118A68,  # GB-core (runtime 0x80136D68, off 0x18A68; hit_count=1)
+    0x81118E18,  # GB-core (runtime 0x80137118, off 0x18E18; hit_count=1)
+    0x811191A8,  # GB-core (runtime 0x801374A8, off 0x191A8; hit_count=1)
+    0x811194AC,  # GB-core (runtime 0x801377AC, off 0x194AC; hit_count=1)
+    0x811195A0,  # GB-core (runtime 0x801378A0, off 0x195A0; hit_count=1)
+    0x811196DC,  # GB-core pointer-site entry (runtime 0x801379DC, off 0x196DC; hit_count=1)
+    0x81119BAC,  # GB-core (runtime 0x80137EAC, off 0x19BAC; hit_count=1)
+    0x81119FFC,  # GB-core (runtime 0x801382FC, off 0x19FFC; hit_count=1)
+    0x8111BFFC,  # GB-core (runtime 0x8013A2FC, off 0x1BFFC; hit_count=1)
     # >>> BEGIN auto-folded from runtime_captures.json -- managed by tools/fold_captures.py
     0x82117ED4,  # outside-loaded hit_count=2366
     0x82117F08,  # outside-loaded hit_count=2366

@@ -573,6 +573,449 @@ extern "C" uint32_t pkmnstadium_trace_capacity(void) {
     return kTraceCap;
 }
 
+extern "C" void pms_gbexec_tailcall_probe(recomp_context* ctx, uint32_t target) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("PMS_GBEXEC_DIAG");
+        return e != nullptr && e[0] != '\0' && e[0] != '0';
+    }();
+    if (!enabled || ctx == nullptr) {
+        return;
+    }
+
+    const uint32_t fp = static_cast<uint32_t>(ctx->r30);
+    const uint32_t mem_base = fp - 0xFE00u;
+    const bool likely_gb_fp =
+        mem_base >= 0x80200000u && mem_base < 0x80400000u &&
+        fp >= 0x80200000u && fp < 0x80410000u;
+
+    static const bool force_tailcall_noboot = [] {
+        const char* e = std::getenv("PMS_GBEXEC_FORCE_TAILCALL_NOBOOT");
+        return e != nullptr && e[0] != '\0' && e[0] != '0';
+    }();
+    if (force_tailcall_noboot && likely_gb_fp) {
+        if (unsigned char* rdram = recomp_runtime_get_rdram()) {
+            const uint32_t boot_flag_addr = fp + 0x38Du;
+            if (pms_diag_rdram_range(boot_flag_addr, 1)) {
+                uint8_t& boot_flag = rdram[(boot_flag_addr & 0x1FFFFFFFu) ^ 3];
+                if (boot_flag == 0) {
+                    boot_flag = 1;
+                    static std::atomic<uint32_t> noboot_count{0};
+                    const uint32_t hit = noboot_count.fetch_add(1, std::memory_order_relaxed);
+                    if (hit < 16) {
+                        std::fprintf(stderr,
+                            "[gbexec] force-noboot #%u target=0x%08X fp=0x%08X mem_base=0x%08X flag=0x%08X\n",
+                            hit, target, fp, mem_base, boot_flag_addr);
+                        std::fflush(stderr);
+                    }
+                }
+            }
+        }
+    }
+
+    if (target == 0x8111881Cu && likely_gb_fp && static_cast<uint32_t>(ctx->r24) > 0xFFFFu) {
+        static std::atomic<uint32_t> wrap_count{0};
+        const uint32_t hit = wrap_count.fetch_add(1, std::memory_order_relaxed);
+        const uint32_t old_sp = static_cast<uint32_t>(ctx->r24);
+        ctx->r24 = old_sp & 0xFFFFu;
+        if (hit < 32 || (hit & 0xFFu) == 0) {
+            std::fprintf(stderr,
+                "[gbexec] sp-wrap #%u target=0x%08X r31=0x%08X hrt=0x%08X "
+                "fp=0x%08X mem_base=0x%08X old_t8=0x%08X new_t8=0x%08X "
+                "pc=0x%08X opcode=0x%02X t9=0x%08X\n",
+                hit, target, static_cast<uint32_t>(ctx->r31), ctx->host_return_target,
+                fp, mem_base, old_sp, static_cast<uint32_t>(ctx->r24),
+                static_cast<uint32_t>(ctx->r23), static_cast<uint32_t>(ctx->r8) & 0xFFu,
+                static_cast<uint32_t>(ctx->r25));
+            std::fflush(stderr);
+        }
+    }
+
+    if (static_cast<uint32_t>(ctx->r2) != 0xFFFFFFFFu) {
+        return;
+    }
+
+    const bool target_in_gb_overlay =
+        target >= 0x81100000u && target < 0x81154B20u;
+    const bool return_in_gb_overlay =
+        static_cast<uint32_t>(ctx->r31) >= 0x81100000u &&
+        static_cast<uint32_t>(ctx->r31) < 0x81154B20u;
+    const bool host_return_in_gb_overlay =
+        ctx->host_return_target >= 0x81100000u &&
+        ctx->host_return_target < 0x81154B20u;
+    if (!target_in_gb_overlay && !return_in_gb_overlay && !host_return_in_gb_overlay) {
+        return;
+    }
+
+    PTR(OSThread) self = ultramodern::this_thread();
+    uint32_t thread = static_cast<uint32_t>(self);
+    uint16_t thread_id = 0;
+    if (self != NULLPTR) {
+        if (unsigned char* rdram = recomp_runtime_get_rdram()) {
+            (void)rdram;
+            OSThread* t = TO_PTR(OSThread, self);
+            thread_id = static_cast<uint16_t>(t->id);
+        }
+    }
+
+    const char* func = "(unknown)";
+    const uint64_t widx = g_trace_widx.load(std::memory_order_relaxed);
+    const uint64_t n = (widx < kTraceCap) ? widx : kTraceCap;
+    for (uint64_t i = 0; i < n; i++) {
+        const TraceNameEvent ev = g_trace_ring[(widx - 1 - i) % kTraceCap];
+        if ((thread != 0 && ev.thread == thread) ||
+            (thread == 0 && thread_id != 0 && ev.thread_id == thread_id)) {
+            func = ev.name ? ev.name : "(null)";
+            break;
+        }
+    }
+
+    unsigned char* rdram = recomp_runtime_get_rdram();
+    auto read_u8 = [&](uint32_t addr) -> uint32_t {
+        if (rdram == nullptr || !pms_diag_rdram_range(addr, 1)) {
+            return 0;
+        }
+        return rdram[(addr & 0x1FFFFFFFu) ^ 3];
+    };
+    const uint32_t dispatch_ptr = pms_diag_read_u32(rdram, fp + 0x388u);
+    const uint32_t lcdc = read_u8(mem_base + 0xFF40u);
+    const uint32_t stat = read_u8(mem_base + 0xFF41u);
+    const uint32_t scy  = read_u8(mem_base + 0xFF42u);
+    const uint32_t ly   = read_u8(mem_base + 0xFF44u);
+    const uint32_t iff  = read_u8(mem_base + 0xFF0Fu);
+    const uint32_t ie   = read_u8(mem_base + 0xFFFFu);
+
+    static std::atomic<uint32_t> hit_count{0};
+    const uint32_t hit = hit_count.fetch_add(1, std::memory_order_relaxed);
+    if (hit < 64 || (hit & 0xFFu) == 0) {
+        std::fprintf(stderr,
+            "[gbexec] tailcall-v0-minus1 #%u func=%s target=0x%08X r31=0x%08X "
+            "hrt=0x%08X sp=0x%08X fp=0x%08X mem_base=0x%08X dispatch=0x%08X "
+            "tid=%u th=0x%08X LCDC=%02X STAT=%02X SCY=%02X LY=%02X IF=%02X IE=%02X\n",
+            hit, func, target, static_cast<uint32_t>(ctx->r31),
+            ctx->host_return_target, static_cast<uint32_t>(ctx->r29), fp, mem_base,
+            dispatch_ptr, thread_id, thread, lcdc, stat, scy, ly, iff, ie);
+        std::fflush(stderr);
+    }
+}
+
+extern "C" void pms_gbexec_r2minus1_probe(uint32_t site, uint8_t* rdram, recomp_context* ctx) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("PMS_GBEXEC_DIAG");
+        return e != nullptr && e[0] != '\0' && e[0] != '0';
+    }();
+    if (!enabled || rdram == nullptr || ctx == nullptr ||
+        static_cast<uint32_t>(ctx->r2) != 0xFFFFFFFFu) {
+        return;
+    }
+    if (site < 0x81100000u || site >= 0x81154B20u) {
+        return;
+    }
+
+    const uint32_t fp = static_cast<uint32_t>(ctx->r30);
+    const uint32_t mem_base = fp - 0xFE00u;
+    const bool likely_gb_fp =
+        mem_base >= 0x80200000u && mem_base < 0x80400000u &&
+        fp >= 0x80200000u && fp < 0x80410000u;
+
+    auto read_u8 = [&](uint32_t addr) -> uint32_t {
+        if (!pms_diag_rdram_range(addr, 1)) {
+            return 0;
+        }
+        return rdram[(addr & 0x1FFFFFFFu) ^ 3];
+    };
+    const uint32_t dispatch_ptr =
+        (likely_gb_fp && pms_diag_rdram_range(fp + 0x388u, 4))
+            ? pms_diag_read_u32(rdram, fp + 0x388u)
+            : 0;
+    const uint32_t gb_pc = likely_gb_fp ? pms_diag_read_u32(rdram, mem_base + 0x10084u) : 0;
+    const uint32_t lcdc = likely_gb_fp ? read_u8(mem_base + 0xFF40u) : 0;
+    const uint32_t stat = likely_gb_fp ? read_u8(mem_base + 0xFF41u) : 0;
+    const uint32_t scy  = likely_gb_fp ? read_u8(mem_base + 0xFF42u) : 0;
+    const uint32_t ly   = likely_gb_fp ? read_u8(mem_base + 0xFF44u) : 0;
+    const uint32_t iff  = likely_gb_fp ? read_u8(mem_base + 0xFF0Fu) : 0;
+    const uint32_t ie   = likely_gb_fp ? read_u8(mem_base + 0xFFFFu) : 0;
+
+    static std::atomic<uint32_t> hit_count{0};
+    const uint32_t hit = hit_count.fetch_add(1, std::memory_order_relaxed);
+    if (hit < 128 || (hit & 0xFFu) == 0) {
+        std::fprintf(stderr,
+            "[gbexec] r2-minus1 #%u site=0x%08X r31=0x%08X hrt=0x%08X "
+            "sp=0x%08X fp=0x%08X mem_base=0x%08X dispatch=0x%08X gbpc_word=0x%08X "
+            "a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+            "at=0x%08X t0=0x%08X t1=0x%08X t8=0x%08X t9=0x%08X "
+            "s0=0x%08X s1=0x%08X s2=0x%08X s3=0x%08X s4=0x%08X "
+            "s5=0x%08X s6=0x%08X s7=0x%08X "
+            "LCDC=%02X STAT=%02X SCY=%02X LY=%02X IF=%02X IE=%02X\n",
+            hit, site, static_cast<uint32_t>(ctx->r31), ctx->host_return_target,
+            static_cast<uint32_t>(ctx->r29), fp, mem_base, dispatch_ptr, gb_pc,
+            static_cast<uint32_t>(ctx->r4), static_cast<uint32_t>(ctx->r5),
+            static_cast<uint32_t>(ctx->r6), static_cast<uint32_t>(ctx->r7),
+            static_cast<uint32_t>(ctx->r1), static_cast<uint32_t>(ctx->r8),
+            static_cast<uint32_t>(ctx->r9), static_cast<uint32_t>(ctx->r24),
+            static_cast<uint32_t>(ctx->r25),
+            static_cast<uint32_t>(ctx->r16), static_cast<uint32_t>(ctx->r17),
+            static_cast<uint32_t>(ctx->r18), static_cast<uint32_t>(ctx->r19),
+            static_cast<uint32_t>(ctx->r20), static_cast<uint32_t>(ctx->r21),
+            static_cast<uint32_t>(ctx->r22), static_cast<uint32_t>(ctx->r23),
+            lcdc, stat, scy, ly, iff, ie);
+        std::fflush(stderr);
+    }
+}
+
+extern "C" void pms_gbexec_pc_probe(uint32_t site, uint8_t* rdram, recomp_context* ctx) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("PMS_GBEXEC_DIAG");
+        return e != nullptr && e[0] != '\0' && e[0] != '0';
+    }();
+    if (!enabled || rdram == nullptr || ctx == nullptr || site != 0x8111881Cu) {
+        return;
+    }
+
+    const uint32_t fp = static_cast<uint32_t>(ctx->r30);
+    const uint32_t mem_base = fp - 0xFE00u;
+    const bool likely_gb_fp =
+        mem_base >= 0x80200000u && mem_base < 0x80400000u &&
+        fp >= 0x80200000u && fp < 0x80410000u;
+    if (!likely_gb_fp) {
+        return;
+    }
+
+    auto read_u8 = [&](uint32_t addr) -> uint32_t {
+        if (!pms_diag_rdram_range(addr, 1)) {
+            return 0;
+        }
+        return rdram[(addr & 0x1FFFFFFFu) ^ 3];
+    };
+    auto read_u16 = [&](uint32_t addr) -> uint32_t {
+        return (read_u8(addr) << 8) | read_u8(addr + 1u);
+    };
+    auto write_u8 = [&](uint32_t addr, uint32_t value) {
+        if (!pms_diag_rdram_range(addr, 1)) {
+            return;
+        }
+        rdram[(addr & 0x1FFFFFFFu) ^ 3] = static_cast<uint8_t>(value & 0xFFu);
+    };
+    auto read_gb_u8 = [&](uint32_t gb_addr) -> uint32_t {
+        gb_addr &= 0xFFFFu;
+        const uint32_t page_slot = fp + 0x5D00u + ((gb_addr >> 13) * 4u);
+        const uint32_t page_base = pms_diag_read_u32(rdram, page_slot);
+        if (!pms_diag_rdram_range(page_base + gb_addr, 1)) {
+            return 0;
+        }
+        return read_u8(page_base + gb_addr);
+    };
+    auto write_u16 = [&](uint32_t addr, uint32_t value) {
+        if (!pms_diag_rdram_range(addr, 2)) {
+            return;
+        }
+        const uint32_t paddr = addr & 0x1FFFFFFFu;
+        rdram[(paddr + 0u) ^ 3] = static_cast<uint8_t>((value >> 8) & 0xFFu);
+        rdram[(paddr + 1u) ^ 3] = static_cast<uint8_t>(value & 0xFFu);
+    };
+    auto print_bytes = [&](const char* label, uint32_t addr, uint32_t len) {
+        std::fprintf(stderr, "[gbexec] %s @0x%08X:", label, addr);
+        for (uint32_t i = 0; i < len; i++) {
+            std::fprintf(stderr, " %02X", read_u8(addr + i));
+        }
+        std::fprintf(stderr, "\n");
+    };
+
+    static std::atomic<uint32_t> map_dump_count{0};
+    const uint32_t map_dump_hit = map_dump_count.fetch_add(1, std::memory_order_relaxed);
+    if (map_dump_hit == 0) {
+        const uint32_t gb_ctx = static_cast<uint32_t>(ctx->r4);
+        const uint32_t cart_ptr = pms_diag_read_u32(rdram, gb_ctx + 0x1Cu);
+        const uint32_t dispatch_ptr = pms_diag_read_u32(rdram, fp + 0x388u);
+        const uint32_t page0 = pms_diag_read_u32(rdram, fp + 0x5D00u);
+        const uint32_t page1 = pms_diag_read_u32(rdram, fp + 0x5D04u);
+        const uint32_t page2 = pms_diag_read_u32(rdram, fp + 0x5D08u);
+        const uint32_t page3 = pms_diag_read_u32(rdram, fp + 0x5D0Cu);
+        const uint32_t page4 = pms_diag_read_u32(rdram, fp + 0x5D10u);
+        const uint32_t page5 = pms_diag_read_u32(rdram, fp + 0x5D14u);
+        const uint32_t page6 = pms_diag_read_u32(rdram, fp + 0x5D18u);
+        const uint32_t page7 = pms_diag_read_u32(rdram, fp + 0x5D1Cu);
+        const uint32_t section1 = section_addresses != nullptr
+            ? static_cast<uint32_t>(section_addresses[1])
+            : 0;
+        const uint32_t gb_global = section1 != 0 ? section1 + 0x56540u : 0;
+        const uint32_t global_cart = section1 != 0 ? pms_diag_read_u32(rdram, gb_global + 0x1Cu) : 0;
+        const uint32_t boot_count = section1 != 0 ? read_u8(section1 + 0x565A4u) : 0;
+        const uint32_t boot_src = section1 != 0 ? pms_diag_read_u32(rdram, section1 + 0x565A8u) : 0;
+        const uint32_t ctx_pc = read_u16(gb_ctx + 0x0Cu);
+        const uint32_t ctx_sp = read_u16(gb_ctx + 0x0Eu);
+
+        std::fprintf(stderr,
+            "[gbexec] map-dump #%u gb_ctx=0x%08X gb_global=0x%08X fp=0x%08X "
+            "mem_base=0x%08X ctx_pc=0x%04X ctx_sp=0x%04X cart=0x%08X "
+            "global_cart=0x%08X dispatch=0x%08X boot_flag=%02X boot_count=%02X "
+            "boot_src=0x%08X pc_reg=0x%08X sp_reg=0x%08X op_reg=%02X\n",
+            map_dump_hit, gb_ctx, gb_global, fp, mem_base, ctx_pc, ctx_sp, cart_ptr,
+            global_cart, dispatch_ptr, read_u8(fp + 0x38Du), boot_count, boot_src,
+            static_cast<uint32_t>(ctx->r23), static_cast<uint32_t>(ctx->r24),
+            static_cast<uint32_t>(ctx->r8) & 0xFFu);
+        std::fprintf(stderr,
+            "[gbexec] page-table %08X %08X %08X %08X %08X %08X %08X %08X\n",
+            page0, page1, page2, page3, page4, page5, page6, page7);
+        print_bytes("cart+0000", cart_ptr, 16);
+        print_bytes("cart+0038", cart_ptr + 0x38u, 16);
+        print_bytes("cart+0100", cart_ptr + 0x100u, 32);
+        print_bytes("page0+0000", page0, 16);
+        print_bytes("page0+0038", page0 + 0x38u, 16);
+        print_bytes("page0+0100", page0 + 0x100u, 32);
+        if (boot_src != 0) {
+            print_bytes("boot-src+0000", boot_src, 16);
+            print_bytes("boot-src+0038", boot_src + 0x38u, 16);
+            print_bytes("boot-src+0100", boot_src + 0x100u, 32);
+        }
+        std::fflush(stderr);
+    }
+
+    uint32_t pc = static_cast<uint32_t>(ctx->r23);
+    uint32_t sp = static_cast<uint32_t>(ctx->r24) & 0xFFFFu;
+    uint32_t opcode_reg = static_cast<uint32_t>(ctx->r8) & 0xFFu;
+
+    static const bool force_noboot = [] {
+        const char* e = std::getenv("PMS_GBEXEC_FORCE_NOBOOT");
+        return e != nullptr && e[0] != '\0' && e[0] != '0';
+    }();
+    static std::atomic<uint32_t> forced_pc_count{0};
+    if (force_noboot && pc < 0x0100u && forced_pc_count.fetch_add(1, std::memory_order_relaxed) == 0) {
+        const uint32_t gb_ctx = static_cast<uint32_t>(ctx->r4);
+        const uint32_t cart_ptr = pms_diag_read_u32(rdram, gb_ctx + 0x1Cu);
+        const uint32_t section1 = section_addresses != nullptr
+            ? static_cast<uint32_t>(section_addresses[1])
+            : 0;
+        const uint32_t boot_count_addr = section1 != 0 ? section1 + 0x565A4u : 0;
+        const uint32_t boot_src = section1 != 0 ? pms_diag_read_u32(rdram, section1 + 0x565A8u) : 0;
+        uint32_t copied = 0;
+        if (pms_diag_rdram_range(cart_ptr, 0x102u) &&
+            pms_diag_rdram_range(boot_src, 0x102u)) {
+            for (uint32_t i = 0; i < 0x102u; i++) {
+                write_u8(cart_ptr + i, read_u8(boot_src + i));
+            }
+            copied = 0x102u;
+        }
+        if (boot_count_addr != 0) {
+            write_u8(boot_count_addr, 0);
+        }
+        write_u8(fp + 0x38Du, 1);
+        write_u16(gb_ctx + 0x0Cu, 0x0100u);
+        write_u16(gb_ctx + 0x0Eu, 0xFFFEu);
+        pc = 0x0100u;
+        sp = 0xFFFEu;
+        opcode_reg = read_gb_u8(pc);
+        ctx->r23 = pc;
+        ctx->r24 = sp;
+        ctx->r8 = opcode_reg;
+        ctx->r9 = static_cast<int32_t>(opcode_reg << 2);
+        std::fprintf(stderr,
+            "[gbexec] force-pc0100 gb_ctx=0x%08X fp=0x%08X mem_base=0x%08X "
+            "cart=0x%08X boot_src=0x%08X copied=0x%X opcode=%02X "
+            "bytes=%02X %02X %02X\n",
+            gb_ctx, fp, mem_base, cart_ptr, boot_src, copied, opcode_reg,
+            read_gb_u8(pc), read_gb_u8(pc + 1u), read_gb_u8(pc + 2u));
+        std::fflush(stderr);
+    }
+
+    const uint32_t page_slot = fp + 0x5D00u + (((pc & 0xFFFFu) >> 13) * 4u);
+    const uint32_t page_base = pms_diag_read_u32(rdram, page_slot);
+    const uint32_t b0 = read_gb_u8(pc);
+    const uint32_t b1 = read_gb_u8(pc + 1u);
+    const uint32_t b2 = read_gb_u8(pc + 2u);
+
+    static std::atomic<uint32_t> hit_count{0};
+    static std::atomic<uint32_t> log_count{0};
+    static std::atomic<uint32_t> prev_pc_atomic{0xFFFFFFFFu};
+    static std::atomic<uint32_t> prev_sp_atomic{0xFFFFFFFFu};
+    static std::atomic<uint32_t> prev_op_atomic{0xFFFFFFFFu};
+
+    const uint32_t hit = hit_count.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t prev_pc = prev_pc_atomic.exchange(pc, std::memory_order_relaxed);
+    const uint32_t prev_sp = prev_sp_atomic.exchange(sp, std::memory_order_relaxed);
+    const uint32_t prev_op = prev_op_atomic.exchange(opcode_reg, std::memory_order_relaxed);
+
+    const bool anomalous =
+        pc < 0x0100u || pc >= 0xE000u || sp == 0 ||
+        (pc == 0x0038u) || (prev_pc == 0x0038u) ||
+        (prev_pc != 0xFFFFFFFFu && prev_pc >= 0x0100u && pc == 0);
+    if (hit < 96 || anomalous) {
+        const uint32_t log_hit = log_count.fetch_add(1, std::memory_order_relaxed);
+        if (log_hit < 256) {
+            std::fprintf(stderr,
+                "[gbexec] pc-step #%u site=0x%08X r31=0x%08X hrt=0x%08X "
+                "fp=0x%08X mem_base=0x%08X pc=0x%04X sp=0x%04X "
+                "op_reg=%02X bytes=%02X %02X %02X page=0x%08X "
+                "prev_pc=0x%04X prev_sp=0x%04X prev_op=%02X "
+                "s0=0x%08X s6=0x%08X t9=0x%08X\n",
+                hit, site, static_cast<uint32_t>(ctx->r31), ctx->host_return_target,
+                fp, mem_base, pc & 0xFFFFu, sp, opcode_reg, b0, b1, b2, page_base,
+                prev_pc & 0xFFFFu, prev_sp & 0xFFFFu, prev_op & 0xFFu,
+                static_cast<uint32_t>(ctx->r16), static_cast<uint32_t>(ctx->r22),
+                static_cast<uint32_t>(ctx->r25));
+            std::fflush(stderr);
+        }
+    }
+}
+
+extern "C" void pms_gbexec_r24_probe(uint32_t site, uint8_t* rdram, recomp_context* ctx) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("PMS_GBEXEC_DIAG");
+        return e != nullptr && e[0] != '\0' && e[0] != '0';
+    }();
+    if (!enabled || rdram == nullptr || ctx == nullptr ||
+        static_cast<uint32_t>(ctx->r24) <= 0xFFFFu) {
+        return;
+    }
+    if (site < 0x81100000u || site >= 0x81154B20u) {
+        return;
+    }
+
+    const uint32_t fp = static_cast<uint32_t>(ctx->r30);
+    const uint32_t mem_base = fp - 0xFE00u;
+    const bool likely_gb_fp =
+        mem_base >= 0x80200000u && mem_base < 0x80400000u &&
+        fp >= 0x80200000u && fp < 0x80410000u;
+    if (!likely_gb_fp) {
+        return;
+    }
+
+    auto read_u8 = [&](uint32_t addr) -> uint32_t {
+        if (!pms_diag_rdram_range(addr, 1)) {
+            return 0;
+        }
+        return rdram[(addr & 0x1FFFFFFFu) ^ 3];
+    };
+
+    const uint32_t sp16 = static_cast<uint32_t>(ctx->r24) & 0xFFFFu;
+    const uint32_t prev0 = read_u8(mem_base + ((sp16 - 2u) & 0xFFFFu));
+    const uint32_t prev1 = read_u8(mem_base + ((sp16 - 1u) & 0xFFFFu));
+    const uint32_t cur0 = read_u8(mem_base + sp16);
+    const uint32_t cur1 = read_u8(mem_base + ((sp16 + 1u) & 0xFFFFu));
+    const uint32_t dispatch_ptr =
+        pms_diag_rdram_range(fp + 0x388u, 4)
+            ? pms_diag_read_u32(rdram, fp + 0x388u)
+            : 0;
+
+    static std::atomic<uint32_t> hit_count{0};
+    const uint32_t hit = hit_count.fetch_add(1, std::memory_order_relaxed);
+    if (hit < 32 || (hit & 0xFFu) == 0) {
+        std::fprintf(stderr,
+            "[gbexec] r24-overflow #%u site=0x%08X r31=0x%08X hrt=0x%08X "
+            "n64sp=0x%08X fp=0x%08X mem_base=0x%08X dispatch=0x%08X "
+            "t8=0x%08X sp16=0x%04X pc=0x%08X opcode=0x%02X t9=0x%08X "
+            "a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X "
+            "stack[-2..+1]=%02X %02X %02X %02X\n",
+            hit, site, static_cast<uint32_t>(ctx->r31), ctx->host_return_target,
+            static_cast<uint32_t>(ctx->r29), fp, mem_base, dispatch_ptr,
+            static_cast<uint32_t>(ctx->r24), sp16, static_cast<uint32_t>(ctx->r23),
+            static_cast<uint32_t>(ctx->r8) & 0xFFu, static_cast<uint32_t>(ctx->r25),
+            static_cast<uint32_t>(ctx->r4), static_cast<uint32_t>(ctx->r5),
+            static_cast<uint32_t>(ctx->r6), static_cast<uint32_t>(ctx->r7),
+            prev0, prev1, cur0, cur1);
+        std::fflush(stderr);
+    }
+}
+
 // ---- Text-draw discovery census --------------------------------------------
 //
 // PMS-J relaid the code vs. the US PokemonStadium oracle, so the string-draw
@@ -808,6 +1251,31 @@ extern "C" void pkmnstadium_textdraw_probe(const char* name,
         return;
     }
     const uint32_t pc = parse_fun_pc(name);
+
+    // DIAG (temp): GB-Tower cart-check tracing. The red-X "save corrupt" screen
+    // (FUN_800268e4) is fired by the cart-check orchestrator FUN_80021cf4 /
+    // FUN_8002178c on a Transfer-Pak STATUS sub-check failure (self-test
+    // FUN_8000bac8, per-channel FUN_8000bb88, teardown FUN_8000bc78) — NOT the
+    // Gen-1 save checksum (the save validates). Log the error trigger (caller +
+    // port + code) always; log the sub-check sequence under PMS_GBPAK_DIAG=1 so
+    // we can pin which one rejects a valid JP save and force it.
+    {
+        static const bool gbdiag = [] {
+            const char* e = std::getenv("PMS_GBPAK_DIAG");
+            return e != nullptr && e[0] != '\0' && e[0] != '0';
+        }();
+        if (pc == 0x800268e4u) {
+            std::fprintf(stderr, "[gbpak] *** CORRUPT-UI FUN_800268e4 caller=0x%08X port=%u code=%u\n",
+                         ra, a0, a1);
+            std::fflush(stderr);
+        } else if (gbdiag && (pc == 0x8000bc78u || pc == 0x8000bac8u || pc == 0x8000bb88u ||
+                              pc == 0x80021cf4u || pc == 0x8002178cu || pc == 0x800211c4u ||
+                              pc == 0x80021248u)) {
+            std::fprintf(stderr, "[gbpak] enter %s caller=0x%08X port=%u a1=%u\n", name, ra, a0, a1);
+            std::fflush(stderr);
+        }
+    }
+
     uint8_t buf[kSrcMax];
     uint16_t len = 0;
 

@@ -184,6 +184,19 @@ static RspExitReason njpeg_wrapper(uint8_t* rdram, uint32_t ucode_addr) {
 static RspUcodeFunc* get_rsp_microcode(uint8_t* rdram, const OSTask* task) {
     static std::atomic<bool> warned{false};
     if (task->t.type == M_AUDTASK) {
+        const uint32_t data_ptr = static_cast<uint32_t>(task->t.data_ptr);
+        const uint32_t data_size = static_cast<uint32_t>(task->t.data_size);
+        const uint32_t data_off = data_ptr & 0x1FFFFFFFu;
+        if (data_size == 0 || data_off > 0x800000u || data_size > 0x800000u - data_off) {
+            static std::atomic<bool> bad_audio_warned{false};
+            if (!bad_audio_warned.exchange(true)) {
+                std::fprintf(stderr,
+                    "[PMS] dropping malformed M_AUDTASK: data=0x%08X size=0x%X\n",
+                    data_ptr, data_size);
+                std::fflush(stderr);
+            }
+            return nullptr;
+        }
         static std::atomic<bool> a{false};
         if (!a.exchange(true)) { std::fprintf(stderr, "[PMS] RSP M_AUDTASK -> aspMain (first)\n"); std::fflush(stderr); }
         return aspMain;

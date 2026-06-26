@@ -53,6 +53,16 @@ extern "C" void pms_dump_ultra_trace(const char* tag);
 // tables to pin a softlock's deadlock vertex: which thread parked on which queue
 // (blocked_on_recv with no later wakeup) and whether anyone ever sent to it.
 extern "C" uint32_t ultramodern_running_queue_head(void);
+extern "C" void ultramodern_get_current_dl_state(
+    uint64_t* entry_seq, uint64_t* exit_seq,
+    uint64_t* entry_ms,  uint64_t* exit_ms,
+    uint32_t* data_ptr,  uint32_t* data_size,
+    uint32_t* ucode_ptr);
+extern "C" void ultramodern_get_vi_debug_state(
+    uint32_t* cur_flags, uint32_t* next_flags,
+    uint32_t* cur_fb,    uint32_t* next_fb,
+    uint32_t* origin,    uint32_t* h_start,
+    uint32_t* y_scale,   uint32_t* status);
 extern "C" void   ultramodern_sched_recent_copy(void* out, size_t cap, size_t* n_written, uint64_t* next_seq_out);
 extern "C" size_t ultramodern_sched_event_size(void);
 extern "C" size_t ultramodern_sched_thread_state_size(void);
@@ -393,6 +403,78 @@ static std::string handle_line(const std::string& raw_line) {
         out += hex;
         out += "\"}";
         return out;
+    }
+    if (cmd == "write_mem") {
+        const std::string addr_s = get_str(line, "addr");
+        const std::string data_s = get_str(line, "data");
+        const uint32_t addr = (uint32_t)std::strtoul(addr_s.c_str(), nullptr, 0);
+        if (data_s.empty() || (data_s.size() & 1u) != 0) {
+            return R"({"ok":false,"error":"data must be even-length hex"})";
+        }
+        const uint32_t len = (uint32_t)(data_s.size() / 2);
+        if (len > 0x10000u) {
+            return R"({"ok":false,"error":"data too large"})";
+        }
+        unsigned char* rdram = recomp_runtime_get_rdram();
+        if (rdram == nullptr) {
+            return R"({"ok":false,"error":"rdram unavailable"})";
+        }
+        const uint32_t start = addr & 0x1FFFFFFFu;
+        if (!(addr >= 0x80000000u && addr < 0x80800000u &&
+              start <= 0x00800000u - len)) {
+            return R"({"ok":false,"error":"addr out of range"})";
+        }
+        auto hex_val = [](char ch) -> int {
+            if (ch >= '0' && ch <= '9') return ch - '0';
+            if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+            if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+            return -1;
+        };
+        const uint32_t paddr = addr & 0x1FFFFFFFu;
+        for (uint32_t i = 0; i < len; i++) {
+            const int hi = hex_val(data_s[i * 2]);
+            const int lo = hex_val(data_s[i * 2 + 1]);
+            if (hi < 0 || lo < 0) {
+                return R"({"ok":false,"error":"invalid hex"})";
+            }
+            rdram[(paddr + i) ^ 3] = (unsigned char)((hi << 4) | lo);
+        }
+        char buf[128];
+        std::snprintf(buf, sizeof(buf),
+            "{\"ok\":true,\"addr\":\"0x%08X\",\"len\":%u}",
+            addr, len);
+        return buf;
+    }
+    if (cmd == "dump_vi") {
+        uint32_t cur_flags = 0, next_flags = 0, cur_fb = 0, next_fb = 0;
+        uint32_t origin = 0, h_start = 0, y_scale = 0, status = 0;
+        uint64_t dl_entry_seq = 0, dl_exit_seq = 0, dl_entry_ms = 0, dl_exit_ms = 0;
+        uint32_t dl_data = 0, dl_size = 0, dl_ucode = 0;
+        ultramodern_get_vi_debug_state(
+            &cur_flags, &next_flags, &cur_fb, &next_fb,
+            &origin, &h_start, &y_scale, &status);
+        ultramodern_get_current_dl_state(
+            &dl_entry_seq, &dl_exit_seq, &dl_entry_ms, &dl_exit_ms,
+            &dl_data, &dl_size, &dl_ucode);
+        char buf[512];
+        std::snprintf(buf, sizeof(buf),
+            "{\"ok\":true,"
+            "\"cur_flags\":\"0x%08X\",\"next_flags\":\"0x%08X\","
+            "\"cur_fb\":\"0x%08X\",\"next_fb\":\"0x%08X\","
+            "\"origin\":\"0x%08X\",\"h_start\":\"0x%08X\","
+            "\"y_scale\":\"0x%08X\",\"status\":\"0x%08X\","
+            "\"dl_entry_seq\":%llu,\"dl_exit_seq\":%llu,"
+            "\"dl_entry_ms\":%llu,\"dl_exit_ms\":%llu,"
+            "\"dl_data\":\"0x%08X\",\"dl_size\":\"0x%08X\","
+            "\"dl_ucode\":\"0x%08X\"}",
+            cur_flags, next_flags, cur_fb, next_fb,
+            origin, h_start, y_scale, status,
+            (unsigned long long)dl_entry_seq,
+            (unsigned long long)dl_exit_seq,
+            (unsigned long long)dl_entry_ms,
+            (unsigned long long)dl_exit_ms,
+            dl_data, dl_size, dl_ucode);
+        return buf;
     }
     if (cmd == "tracedump") {
         // Dump the os-wrapper ring on demand (live softlock diagnosis) to
