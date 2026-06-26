@@ -1,16 +1,15 @@
 # PocketMonstersStadiumRecomp
 
-> # ⚠️ HEAVILY EXPERIMENTAL — EXPECT BUGS ⚠️
-> A very early, largely untested static recompilation of **Pocket Monsters
-> Stadium (Japan)** with a **work-in-progress English translation**. Treat
-> everything as broken until proven otherwise.
->
-> - **GB mode / GB Tower does NOT work** — it falsely flags valid Game Boy
->   save data as *"corrupt"* and refuses to load it.
-> - **Pokémon registration appears to work**; GB Tower play does not.
-> - **Pokémon Green is the only tested cartridge.** Other-language / other
->   Game Boy cartridges are untested and may not work.
-> - The English translation is **incomplete** — expect missing or wrong text.
+> ⚠️ **This project is very early and expected to be buggy.** It was forked
+> from the US *Pokémon Stadium* recompilation to see how far the same approach
+> could get on the original Japanese *Pocket Monsters Stadium*. Pokémon Stadium
+> had solid pret decompilation coverage to lean on; this game does not, which
+> has made tracking down bugs slow and difficult — so development will likely be
+> set down until someone takes the time to properly decompile and annotate the
+> ROM. The game also never had an official translation, so an in-memory English
+> text layer has been adapted for most scenes; it is not exhaustive and has its
+> own formatting and layout glitches. Treat everything here as a work in
+> progress that is likely to break.
 >
 > An experimental Windows build is under [Releases](../../releases) (**v0.0.1**).
 > No ROM is bundled — bring your own Pocket Monsters Stadium (J) `.z64`.
@@ -59,8 +58,9 @@ documented in [`FINDINGS.md`](FINDINGS.md).
   save data as "corrupt" and won't load imported Pokémon.
 - **Pokémon registration appears to work** (importing your party into Stadium);
   it is GB Tower *play* that does not.
-- **Pokémon Green is the only tested cartridge.** Other-language and other Game
-  Boy cartridges are untested and may not work.
+- **Pokémon Green (Japanese, unmodified) is the only tested cartridge** — and
+  even it currently does not show a proper icon when loaded. Other-language,
+  modified, and other Game Boy cartridges are untested and may not work.
 - The English translation is **incomplete** — many strings are still Japanese,
   and some translated text may be wrong or mis-sized.
 - Some UI sprites (arrow/hand) still have transparency artifacts, and deeper
