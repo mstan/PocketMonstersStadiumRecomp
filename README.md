@@ -17,13 +17,12 @@
 Static recompilation of **Pocket Monsters Stadium (Japan)** — the original
 Japanese release that predates the international *Pokémon Stadium* — to a
 native PC program.
-Built on top of [N64Recomp](https://github.com/N64Recomp/N64Recomp).
 
 This turns the original game into a native PC executable instead of running
 it in an emulator. Most of the work is teaching the recompilation toolchain
 about this one specific ROM. It is a sibling of
 [PokemonStadiumRecomp](https://github.com/mstan/PokemonStadiumRecomp) (the
-US *Pokémon Stadium* recomp) and shares the same companion forks:
+US *Pokémon Stadium* recomp) and uses the same companion repositories:
 
 - [N64Recomp](https://github.com/mstan/N64Recomp) — the static recompiler
 - [N64ModernRuntime](https://github.com/mstan/N64ModernRuntime) — the runtime that stands in for the N64's operating system

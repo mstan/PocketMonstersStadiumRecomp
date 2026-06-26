@@ -145,8 +145,8 @@ the ROM SHA and launches (the runner already does ROM validation in
 *Adds for PMS.* Beyond US feature parity, the launcher should host the
 **translation language-override settings page (#4)**.
 
-*Dependency.* Pulls in the RmlUi/recompui dependency stack (forked in US
-from Zelda64Recomp). Large port; CMake + deps + the full `src/ui/`
+*Dependency.* Pulls in the RmlUi/recompui dependency stack (ported into
+the US recomp). Large port; CMake + deps + the full `src/ui/`
 element library.
 
 *Status.* Not started. Architecture for the settings page tracked in #4.
@@ -350,7 +350,7 @@ lives entirely in this repo: `src/main/diagnostics.cpp`
 (`pkmnstadium_text_xlate` / `pkmnstadium_textdraw_probe` / the `g_xlate` KV +
 `load_translations_locked` / `maybe_reload_translations`) wired in via
 `include/trace.h` on `trace_mode = true`. No part of it is in N64ModernRuntime /
-N64Recomp, so **no other game in the ecosystem can use it.**
+N64Recomp, so **no other recomp project can use it.**
 
 *Why it is not a clean lift.* Audited 2026-06-22: only ~20% is game-agnostic.
 - **Reusable core (-> N64ModernRuntime as e.g. `recomp::text_xlate`):**
