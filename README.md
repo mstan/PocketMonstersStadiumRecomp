@@ -11,7 +11,7 @@
 > own formatting and layout glitches. Treat everything here as a work in
 > progress that is likely to break.
 >
-> An experimental Windows build is under [Releases](../../releases) (**v0.0.1**).
+> An experimental Windows build is under [Releases](../../releases) (**v0.0.2**).
 > No ROM is bundled — bring your own Pocket Monsters Stadium (J) `.z64`.
 
 Static recompilation of **Pocket Monsters Stadium (Japan)** — the original
