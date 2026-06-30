@@ -6,18 +6,17 @@
 # fork that this tree is known to build and boot against, so a checkout
 # is reproducible.
 #
-# All three forks are pinned on `main`. Promoted 2026-06-22 for the first
-# (experimental) PMS-J release. N64ModernRuntime gained: the Transfer Pak
-# GB-Pak status fix (settle reset_state=2 on cart-enable so the GB-Pak SRAM
-# self-test sees RSTB_DETECTION set + RSTB_STATUS clear); the reliable/
-# coalescible RCP hardware-event delivery fix (post_rcp_event — VI retrace is
-# coalescible/droppable, SP/DP/SI/AI completions are reliable/never-lost) that
-# stops a 60Hz VI flood on a shared interrupt queue from starving the gfx
-# task-completions and freezing the boot at the N64 logo; and the depth-64
-# never-evict mesg ring + PSR_GBSELFTEST/PSR_JOYBUS_TRACE diagnostics. The
-# 2026-06-21 dispatch-entry REJECT fix + PSR_INTERP_DISCOVERY sweep are
-# ancestors of this tip. rt64 unchanged from the 2026-06-18 PRESS START (#5)
-# bump. To roll forward: bump the sha, rebuild, re-verify boot.
+# All three forks are pinned on `main`. Bumped 2026-06-30 to the current
+# engine main so PMS-J shares the same Transfer Pak / Game Boy cart model as
+# PokemonStadiumRecomp. N64ModernRuntime now carries the Transfer Pak open-bus
+# fix for DMG carts (a cart's trailing all-zero ROM padding reads back as 0xFF
+# open bus instead of 0x00, #17) and the in-process tcc overlay-JIT backend
+# that replaced sljit; N64Recomp and rt64 advance to their current main tips
+# alongside it. Earlier tips carried the GB-Pak status fix, the reliable/
+# coalescible RCP hardware-event delivery fix, the dispatch-entry REJECT fix +
+# PSR_INTERP_DISCOVERY sweep, and the njpeg/JPEG title-background rendering;
+# those remain ancestors of these tips. To roll forward: bump the sha,
+# rebuild, re-verify boot.
 
 # ── lib/N64ModernRuntime — mstan/N64ModernRuntime ──────────────────
 # The runtime that stands in for the N64 OS. Carries the cooperative-
@@ -25,14 +24,14 @@
 # always-on ultra-trace ring used for PMS boot diagnosis. Embeds
 # N64Recomp as a git submodule at N64ModernRuntime/N64Recomp.
 n64modernruntime_branch = main
-n64modernruntime_sha    = d9b5f81e1c4889bb97ac237505913236fc5228a4
+n64modernruntime_sha    = d739c8de770b67dcb16006b6a9f9950450eb0bd0
 
 # ── (submodule) N64Recomp — mstan/N64Recomp ────────────────────────
 # The static recompiler. Unconditional loop-back-edge checkpoints +
 # delay-slot hard-error + the symbols-file build pipeline PMS uses.
 # Provisioned transitively as N64ModernRuntime's submodule.
 n64recomp_branch = main
-n64recomp_sha    = 94838144bb970ca6b415636924339e90bafa9ebd
+n64recomp_sha    = de6f18b114ede3705e7df98da91e98e366b14f14
 
 # ── lib/rt64 — mstan/rt64 ──────────────────────────────────────────
 # The graphics renderer. Shared with PokemonStadiumRecomp. This tip adds
@@ -44,4 +43,4 @@ n64recomp_sha    = 94838144bb970ca6b415636924339e90bafa9ebd
 # artifact) and presenting full RDRAM when a framebuffer is shorter than the
 # VI scanout (removes the bottom black bar that hid the flavor text).
 rt64_branch = main
-rt64_sha     = d26aa0fc1dc5d5f5d141482e4bc2b11ead0cf497
+rt64_sha     = b58c2f70461aa0fd58bf118fc3cef520a2642203
