@@ -40,8 +40,16 @@ set CFG_RC=%errorlevel%
 echo configure rc=%CFG_RC%
 if not "%CFG_RC%"=="0" ( echo CONFIGURE FAILED rc=%CFG_RC% & exit /b %CFG_RC% )
 
-echo === BUILD ===
-"%CMAKE%" --build "%PROJ%\build" --target PocketMonstersStadiumRecomp > "%PROJ%\_build_pms.log" 2>&1
+:: Throttle so the machine stays usable: cap parallel jobs (default 6, override
+:: PMS_BUILD_JOBS) AND run below-normal priority (clang-cl children inherit it).
+:: Build ALL targets (no --target) so the game exe AND the standalone
+:: recomp-ui launcher (pmsj-launcher) both build.
+if not defined PMS_BUILD_JOBS set "PMS_BUILD_JOBS=6"
+echo === BUILD (throttled: -j %PMS_BUILD_JOBS%, IDLE priority) ===
+:: /low = IDLE priority class (lowest) so foreground apps/games are never
+:: starved; the build only runs on otherwise-idle CPU. clang-cl children
+:: inherit the class. Longer wall-clock is the intended trade.
+start "" /low /b /wait "%CMAKE%" --build "%PROJ%\build" -- -j %PMS_BUILD_JOBS% > "%PROJ%\_build_pms.log" 2>&1
 set BLD_RC=%errorlevel%
 echo build rc=%BLD_RC%
 exit /b %BLD_RC%

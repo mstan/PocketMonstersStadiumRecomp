@@ -51,7 +51,7 @@
 
 #include "app_paths.h"
 #include "debug_server.h"
-#include "ui_seam.h"       // SS Anne RmlUi launcher (in-app first screen)
+#include "launcher_cfg.h"  // game-side reader for the launcher's launcher.cfg
 #include "transfer_pak.h"  // emulated N64 Transfer Pak (GB cart bus)
 
 namespace pms {
@@ -355,9 +355,8 @@ static void reset_audio(uint32_t output_freq) {
 
 static SDL_Window* g_window = nullptr;
 
-// Non-static alias to the SDL window, consumed by the SS Anne UI overlay
-// (src/main/ui_seam.cpp), which references a global `SDL_Window* window`.
-// Assigned in create_window().
+// The game's SDL window, assigned in create_window(). (Formerly also aliased by
+// the in-app RmlUi launcher overlay, now an out-of-process executable.)
 SDL_Window* window = nullptr;
 
 static ultramodern::gfx_callbacks_t::gfx_data_t create_gfx() {
@@ -399,19 +398,6 @@ static std::atomic<bool> s_turbo_persistent{false};
 
 static void update_gfx(void*) {
     pms::dbg::g_frame_count.fetch_add(1);
-    // Open all game controllers once while the launcher is up so SDL delivers
-    // their events for menu navigation (the game otherwise opens pads at boot).
-    if (pkmnstadium::ui_seam::launcher_visible()) {
-        static bool s_launcher_pads_opened = false;
-        if (!s_launcher_pads_opened) {
-            s_launcher_pads_opened = true;
-            SDL_GameControllerUpdate();
-            const int njoy = SDL_NumJoysticks();
-            for (int i = 0; i < njoy; ++i) {
-                if (SDL_IsGameController(i)) SDL_GameControllerOpen(i);
-            }
-        }
-    }
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
         if (ev.type == SDL_QUIT) {
@@ -423,12 +409,6 @@ static void update_gfx(void*) {
             std::fflush(stdout);
             std::fflush(stderr);
             std::_Exit(0);
-        }
-        // While the SS Anne launcher is the active first screen, route input to
-        // it (mouse/keyboard/pad for clicking PLAY, toggles, the cart pickers).
-        if (pkmnstadium::ui_seam::launcher_visible()) {
-            pkmnstadium::ui_seam::queue_event(ev);
-            continue;
         }
         if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_TAB && ev.key.repeat == 0) {
             pms::dbg::g_fast_forward.store(true);
@@ -442,10 +422,11 @@ static void update_gfx(void*) {
 // No stub: with no controller connected, an active port still feeds keyboard
 // input and reads return real idle input.
 //
-// Per-port routing: once the SS Anne launcher commits its config at PLAY, each
-// N64 port (0..3 == Player 1..4) is routed to a specific device. Until then (or
-// under PMS_AUTOBOOT) the legacy single-human model applies: port 0 = keyboard +
-// first pad, ports 1-3 present only when a Transfer Pak cart is configured.
+// Per-port routing: the out-of-process launcher commits its config to
+// launcher.cfg, and at boot each N64 port (0..3 == Player 1..4) is routed to a
+// specific device read from that file. Under PMS_AUTOBOOT the legacy
+// single-human model applies: port 0 = keyboard + first pad, ports 1-3 present
+// only when a Transfer Pak cart is configured.
 
 static SDL_GameController* g_pad = nullptr;
 
@@ -455,9 +436,9 @@ static int g_port_instance[4] = {-1, -1, -1, -1};
 static bool g_port_enabled[4] = {false, false, false, false};
 static SDL_GameController* g_port_pad[4] = {nullptr, nullptr, nullptr, nullptr};
 
-// Snapshot the launcher's assignment into the per-port routing tables. Called
-// once from the boot thread when PLAY is clicked. SDL handles are opened lazily
-// in poll_inputs (on the gfx thread that owns the subsystem).
+// Snapshot the launcher's assignment (from launcher.cfg) into the per-port
+// routing tables. Called once from the boot thread. SDL handles are opened
+// lazily in poll_inputs (on the gfx thread that owns the subsystem).
 static void apply_launcher_input_config() {
     for (int port = 0; port < 4; ++port) {
         const auto pa = pkmnstadium::ui_seam::port_assignment(port);
@@ -908,36 +889,6 @@ int main(int argc, char** argv) {
     reset_audio(48000);
     std::fprintf(stderr, "[PMS] SDL audio/controller init + reset_audio OK\n"); std::fflush(stderr);
 
-    // Enumerate connected gamepads for the SS Anne launcher's controller
-    // dropdowns. Done here (before the render hooks initialize) so the list is
-    // ready when the launcher document loads.
-    {
-        SDL_GameControllerUpdate();
-        std::vector<std::pair<int, std::string>> pads;
-        const int njoy = SDL_NumJoysticks();
-        for (int i = 0; i < njoy; ++i) {
-            if (!SDL_IsGameController(i)) continue;
-            const char* nm = SDL_GameControllerNameForIndex(i);
-            pads.emplace_back(SDL_JoystickGetDeviceInstanceID(i),
-                              nm ? std::string(nm) : std::string("Controller"));
-        }
-        // Disambiguate identical controller names so the dropdown can tell them
-        // apart (assignment is by unique instance id; this only clarifies labels).
-        std::vector<std::string> orig;
-        orig.reserve(pads.size());
-        for (auto& p : pads) orig.push_back(p.second);
-        for (size_t i = 0; i < pads.size(); ++i) {
-            int total = 0, idx = 0;
-            for (size_t j = 0; j < pads.size(); ++j) {
-                if (orig[j] == orig[i]) { ++total; if (j <= i) idx = total; }
-            }
-            if (total > 1) pads[i].second = orig[i] + " #" + std::to_string(idx);
-        }
-        std::fprintf(stderr, "[PMS] %zu gamepad(s) detected for launcher\n", pads.size());
-        std::fflush(stderr);
-        pkmnstadium::ui_seam::set_gamepads(pads);
-    }
-
     recomp::Version project_version{0, 1, 0, ""};
     recomp::register_config_path(std::filesystem::current_path());
 
@@ -1054,32 +1005,31 @@ int main(int argc, char** argv) {
         }
     }
 
-    // The SS Anne launcher is the first screen: the game stays unstarted while
-    // the launcher renders, and boots only when the user clicks PLAY. A dedicated
-    // thread waits for that signal, snapshots the launcher's controller config +
-    // loads the Transfer Pak config it committed, then calls start_game (kept off
-    // the render thread). The natural delay before a click also satisfies the
-    // VI-thread grace window (the dummy VI mode must be installed before
-    // game_status flips to Running, else update_vi derefs a null mode).
-    // PMS_AUTOBOOT=1 bypasses the launcher and boots immediately (dev/regression).
+    // The launcher is now a separate out-of-process executable (pmsj-launcher)
+    // that runs pre-boot, commits launcher.cfg, and spawns this game exe. The
+    // game boots directly from that committed config: a dedicated thread reads
+    // the per-port controller routing (launcher_cfg::port_assignment) + loads the
+    // Transfer Pak config, then calls start_game (kept off the render thread).
+    // The short delay before start_game satisfies the VI-thread grace window (the
+    // dummy VI mode must be installed before game_status flips to Running, else
+    // update_vi derefs a null mode).
+    // PMS_AUTOBOOT=1 ignores launcher.cfg and uses the legacy single-human input
+    // model (dev/regression).
     const bool autoboot = std::getenv("PMS_AUTOBOOT") != nullptr;
     std::thread([game_id = game.game_id, autoboot]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (autoboot) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            std::fprintf(stderr, "[PMS] PMS_AUTOBOOT=1 -> skipping launcher\n"); std::fflush(stderr);
+            std::fprintf(stderr, "[PMS] PMS_AUTOBOOT=1 -> legacy single-human input\n"); std::fflush(stderr);
         } else {
-            while (!pkmnstadium::ui_seam::play_requested()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(16));
-            }
-            apply_launcher_input_config();  // lock in controller/enabled routing
+            apply_launcher_input_config();  // per-port routing from launcher.cfg
         }
-        // Load the Transfer Pak config the launcher just wrote (launcher.cfg) /
-        // env overrides, before the game's first accessory probe.
+        // Load the Transfer Pak config the launcher wrote (launcher.cfg) / env
+        // overrides, before the game's first accessory probe.
         pkmnstadium::transfer_pak::initialize();
         recomp::start_game(game_id);
         std::fprintf(stderr, "[PMS] start_game fired\n"); std::fflush(stderr);
     }).detach();
-    std::fprintf(stderr, "[PMS] launcher-first: waiting for PLAY (set PMS_AUTOBOOT=1 to skip)\n");
+    std::fprintf(stderr, "[PMS] booting from launcher.cfg (set PMS_AUTOBOOT=1 for legacy input)\n");
     std::fflush(stderr);
 
     recomp::rsp::callbacks_t rsp_callbacks{

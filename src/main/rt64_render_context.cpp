@@ -27,7 +27,6 @@
 #include "librecomp/rdp.hpp"
 
 #include "pms_render.h"
-#include "ui_seam.h"  // SS Anne RmlUi launcher — registers RT64 render hooks
 
 static bool sample_positions_supported = false;
 static RT64::UserConfiguration::Antialiasing device_max_msaa = RT64::UserConfiguration::Antialiasing::None;
@@ -250,11 +249,11 @@ pms::renderer::RT64Context::RT64Context(uint8_t* rdram,
 #ifdef _WIN32
     thread_id = window_handle.thread_id;
 #endif
-    // Register the SS Anne RmlUi overlay with RT64 BEFORE the application sets up
-    // its render device — RT64 invokes the init hook (which needs the live
-    // RenderInterface + RenderDevice) during setup, and the draw hook every
-    // presented frame thereafter.
-    pkmnstadium::ui_seam::install();
+    // The launcher is now a separate out-of-process executable (pmsj-launcher,
+    // src/launcher/pmsj_launcher_main.cpp): it runs pre-boot in its own SDL/GL
+    // window, commits launcher.cfg, and spawns this game exe. No RmlUi overlay is
+    // registered on RT64's render hooks anymore — the game boots straight from
+    // launcher.cfg.
 
     std::fprintf(stderr, "[pms-rt64] app->setup(thread_id=%u) ...\n", thread_id); std::fflush(stderr);
     setup_result = map_setup_result(app->setup(thread_id));

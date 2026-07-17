@@ -40,13 +40,6 @@ endif()
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
-# The bundled static FreeType is located via cmake/FindFreetype.cmake; put cmake/
-# on the module path so both RmlUi's build and our find_package(Freetype) resolve
-# to it (lib/ itself is gitignored, so the finder is tracked under cmake/).
-if (WIN32)
-    set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
-endif()
-
 # Release/windowed build: no console window. Off by default (console is handy
 # for dev — the boot log goes to stderr). Configure -DPMS_NO_CONSOLE=ON to ship.
 option(PMS_NO_CONSOLE "Build a windowed release with no console window" OFF)
@@ -68,15 +61,12 @@ set(RT64_SDL_WINDOW_VULKAN TRUE)
 add_compile_definitions(HLSL_CPU)
 add_subdirectory(${CMAKE_SOURCE_DIR}/lib/rt64 ${CMAKE_BINARY_DIR}/rt64)
 
-# ---- RmlUi + lunasvg (UI framework for the SS Anne launcher) ----------------
-# Vendored under lib/. lunasvg first so RmlUi's SVG plugin links it statically.
+# ---- UI framework: shared recomp-ui pre-boot launcher (out-of-process) ------
+# The launcher is a SEPARATE executable (pmsj-launcher, defined after the game
+# target) built against recomp-ui's OWN bundled Dear ImGui + SDL2/GL. The game
+# no longer links any UI framework (the old vendored RmlUi + lunasvg + FreeType
+# overlay is gone). Keep static linkage for the engine subdirs.
 set(BUILD_SHARED_LIBS OFF)
-set(LUNASVG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-add_subdirectory(${CMAKE_SOURCE_DIR}/lib/lunasvg)
-set(RMLUI_SVG_PLUGIN ON CACHE BOOL "" FORCE)
-set(RMLUI_TESTS_ENABLED OFF CACHE BOOL "" FORCE)
-add_subdirectory(${CMAKE_SOURCE_DIR}/lib/RmlUi)
-target_compile_definitions(rmlui_core PRIVATE LUNASVG_BUILD_STATIC)
 
 # ---- N64ModernRuntime (junctioned at lib/N64ModernRuntime) -----------------
 # Transitively adds N64Recomp (+ ares-bridge placeholder) and ultramodern.
@@ -115,14 +105,12 @@ add_executable(PocketMonstersStadiumRecomp
     # Standard libultra JPEG ucode, shared with Pokemon Stadium US.
     ${CMAKE_SOURCE_DIR}/rsp/njpgdspMain.cpp
 
-    # ---- SS Anne RmlUi launcher + emulated Transfer Pak -------------------
-    # The launcher uses plain launcher.rml driven by ui_seam.cpp, rendered by
-    # the game-agnostic recompui RT64 backend (ui_renderer.cpp) + RmlUi's SDL
-    # platform backend. transfer_pak.cpp emulates the N64 Transfer Pak bus.
-    src/main/ui_seam.cpp
+    # ---- launcher.cfg reader + emulated Transfer Pak ----------------------
+    # launcher_cfg.cpp reads the per-port input routing the out-of-process
+    # launcher (pmsj-launcher) commits to launcher.cfg; transfer_pak.cpp emulates
+    # the N64 Transfer Pak bus (reads pN_rom/pN_save from the same file).
+    src/main/launcher_cfg.cpp
     src/main/transfer_pak.cpp
-    ${CMAKE_SOURCE_DIR}/src/ui/ui_renderer.cpp
-    ${CMAKE_SOURCE_DIR}/lib/RmlUi/Backends/RmlUi_Platform_SDL.cpp
 )
 
 target_include_directories(PocketMonstersStadiumRecomp PRIVATE
@@ -140,17 +128,6 @@ target_include_directories(PocketMonstersStadiumRecomp PRIVATE
     ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib/dxc/inc
     ${CMAKE_SOURCE_DIR}/lib/rt64/src/rhi
     ${CMAKE_SOURCE_DIR}/lib/rt64/src/render
-    # ---- SS Anne UI (RmlUi) include paths ----------------------------------
-    ${CMAKE_SOURCE_DIR}/src/ui
-    ${CMAKE_SOURCE_DIR}/src/ui/core
-    ${CMAKE_SOURCE_DIR}/src/ui/util
-    ${CMAKE_SOURCE_DIR}/lib/RmlUi/Include
-    ${CMAKE_SOURCE_DIR}/lib/RmlUi/Backends
-    ${CMAKE_SOURCE_DIR}/lib/GamepadMotionHelpers
-    ${CMAKE_SOURCE_DIR}/lib/freetype-windows-binaries/include
-    ${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib/nativefiledialog-extended/src/include
-    # Generated Interface{VS,PS} shader headers land here.
-    ${CMAKE_BINARY_DIR}/shaders
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
@@ -213,17 +190,7 @@ target_link_libraries(PocketMonstersStadiumRecomp PRIVATE
     ultramodern
     rt64
     ares_bridge
-    # ---- SS Anne UI (RmlUi) ------------------------------------------------
-    RmlUi::Core
-    RmlUi::Debugger
-    lunasvg
-    nfd
 )
-
-# ---- FreeType (RmlUi font engine; bundled static, via cmake/FindFreetype) ---
-find_package(Freetype REQUIRED)
-target_include_directories(PocketMonstersStadiumRecomp PRIVATE ${FREETYPE_INCLUDE_DIRS})
-target_link_libraries(PocketMonstersStadiumRecomp PRIVATE ${FREETYPE_LIBRARIES})
 
 # Windowed (no-console) release. SDL2main supplies WinMain for the WINDOWS
 # subsystem, which calls our SDL_main, so no /ENTRY override is needed.
@@ -231,30 +198,69 @@ if (WIN32 AND PMS_NO_CONSOLE)
     target_link_options(PocketMonstersStadiumRecomp PRIVATE /SUBSYSTEM:WINDOWS)
 endif()
 
-# ---- Interface shader compilation (RmlUi overlay) --------------------------
-# build_vertex_shader / build_pixel_shader come from lib/rt64's CMakeLists and
-# need the DXC option vars + DXC path set in this scope (rt64's own CMake does
-# not export them). Produces ${CMAKE_BINARY_DIR}/shaders/Interface{VS,PS}.hlsl.
-# spirv.h, included by src/ui/ui_renderer.cpp.
-set(DXC_COMMON_OPTS "-I${PROJECT_SOURCE_DIR}/src")
-set(DXC_DXIL_OPTS "-Wno-ignored-attributes")
-set(DXC_SPV_OPTS "-spirv" "-fspv-target-env=vulkan1.0" "-fvk-use-dx-layout")
-set(DXC_PS_OPTS "${DXC_COMMON_OPTS}" "-E" "PSMain" "-T ps_6_0" "-D DYNAMIC_RENDER_PARAMS")
-set(DXC_VS_OPTS "${DXC_COMMON_OPTS}" "-E" "VSMain" "-T vs_6_0" "-D DYNAMIC_RENDER_PARAMS" "-fvk-invert-y")
-if (WIN32)
-    set(DXC "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/x64/dxc.exe")
-elseif (APPLE)
-    set(DXC "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/lib/arm64" "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/arm64/dxc-macos")
-else()
-    set(DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/lib/rt64/src/contrib/dxc/bin/x64/dxc-linux")
-endif()
-
-build_vertex_shader(PocketMonstersStadiumRecomp "shaders/InterfaceVS.hlsl" "shaders/InterfaceVS.hlsl")
-build_pixel_shader(PocketMonstersStadiumRecomp "shaders/InterfacePS.hlsl" "shaders/InterfacePS.hlsl")
-
-# ---- UI assets (launcher.rml, rcss, fonts, cart art) next to the exe --------
+# ---- Game assets (fonts, cart art) next to the exe -------------------------
 add_custom_command(TARGET PocketMonstersStadiumRecomp POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_SOURCE_DIR}/assets"
         "$<TARGET_FILE_DIR:PocketMonstersStadiumRecomp>/assets"
+)
+
+# ============================================================================
+# ---- pmsj-launcher: standalone out-of-process pre-boot launcher exe --------
+# ============================================================================
+# The launcher is its OWN WIN32 GUI executable built against recomp-ui's OWN
+# bundled Dear ImGui + SDL2/GL (NO RECOMP_UI_HOST_IMGUI, NO rt64) — so there is
+# no duplicate-ImGui link conflict (separate binaries). It writes launcher.cfg /
+# rom.cfg and then spawns PocketMonstersStadiumRecomp.exe from the same dir.
+include(${CMAKE_CURRENT_SOURCE_DIR}/recomp-ui/recomp_ui.cmake)
+
+# WIN32 = no console window on Windows. A plain int main() is the entry point
+# (recomp_target_launcher_ui defines SDL_MAIN_HANDLED, so SDL does not redirect
+# to SDL_main); on the WINDOWS subsystem, force the CRT console startup so our
+# main() is called (see /ENTRY below).
+add_executable(pmsj-launcher WIN32 src/launcher/pmsj_launcher_main.cpp)
+
+# Bundles recomp-ui's own ImGui core + SDL2/OpenGL backends + launcher core, and
+# adds the RECOMP_LAUNCHER / SDL_MAIN_HANDLED defines + recomp-ui include dirs,
+# and stages recomp-ui's fonts/img/cart art next to the exe.
+recomp_target_launcher_ui(pmsj-launcher)
+
+# gen1_charmap_jp.h lives in src/main (shared with the game's Transfer Pak).
+target_include_directories(pmsj-launcher PRIVATE ${CMAKE_SOURCE_DIR}/src/main)
+
+target_compile_definitions(pmsj-launcher PRIVATE NOMINMAX)
+
+if (WIN32)
+    # Reuse the same FetchContent SDL2 the game target fetched above.
+    target_include_directories(pmsj-launcher PRIVATE ${sdl2_SOURCE_DIR}/include)
+    target_link_directories(pmsj-launcher PRIVATE ${sdl2_SOURCE_DIR}/lib/x64)
+    # recomp-ui's standalone build links SDL2 + opengl32 (imgui_impl_opengl3 +
+    # launcher_gl.c); comdlg32/ole32 back tinyfiledialogs' native file pickers.
+    # No SDL2main (SDL_MAIN_HANDLED -> our real main() is the entry point).
+    target_link_libraries(pmsj-launcher PRIVATE SDL2 opengl32 comdlg32.lib ole32.lib)
+    # WIN32 subsystem defaults to expecting WinMain; keep our int main() as the
+    # entry (matches recomp-ui's SDL_MAIN_HANDLED standalone build).
+    target_link_options(pmsj-launcher PRIVATE /ENTRY:mainCRTStartup)
+
+    # Ship SDL2.dll next to the launcher exe (same dir as the game — the game
+    # target also copies it, but be explicit so the launcher runs standalone).
+    add_custom_command(TARGET pmsj-launcher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${sdl2_SOURCE_DIR}/lib/x64/SDL2.dll"
+            $<TARGET_FILE_DIR:pmsj-launcher>
+    )
+else()
+    find_package(SDL2 REQUIRED)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(pmsj-launcher PRIVATE SDL2::SDL2 OpenGL::GL ${CMAKE_DL_LIBS})
+endif()
+
+# Stage the Japanese font for the launcher: recomp-ui's apply_scale merges
+# assets/fonts/NotoSansJP-Subset.ttf if present, so kana cart labels + trainer
+# names render. recomp_ui.cmake already created assets/fonts and staged its own
+# Lato fonts + img/cart art there.
+add_custom_command(TARGET pmsj-launcher POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/assets/NotoSansJP-Subset.ttf"
+        "$<TARGET_FILE_DIR:pmsj-launcher>/assets/fonts/"
 )
