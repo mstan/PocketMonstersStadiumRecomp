@@ -15,6 +15,9 @@
 
 setlocal enabledelayedexpansion
 
+git submodule update --init --recursive lib/N64ModernRuntime lib/rt64
+if errorlevel 1 exit /b %errorlevel%
+
 set "N64MR_REPO=https://github.com/mstan/N64ModernRuntime.git"
 set "RT64_REPO=https://github.com/mstan/rt64.git"
 set "BRANCH=main"

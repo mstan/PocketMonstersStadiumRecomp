@@ -17,7 +17,9 @@ generated/
 # Vendored engine forks live under lib/ as junctions to the sister
 # checkouts (N64ModernRuntime, rt64), recreated by setup.bat/sh. Each is
 # its own repository — never committed here. See n64recomp.pin.
-lib/
+lib/*
+!lib/N64ModernRuntime
+!lib/rt64
 
 # Ghidra project state (live DBs are machine-specific and large; reseed
 # via tools/ghidra_seed.py + tools/GhidraSeed.java)

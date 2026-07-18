@@ -1,0 +1,6 @@
+[submodule "N64ModernRuntime"]
+	path = lib/N64ModernRuntime
+	url = https://github.com/mstan/N64ModernRuntime.git
+[submodule "rt64"]
+	path = lib/rt64
+	url = https://github.com/mstan/rt64.git

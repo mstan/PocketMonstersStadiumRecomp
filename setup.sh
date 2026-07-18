@@ -10,6 +10,8 @@
 # recorded in n64recomp.pin.
 set -euo pipefail
 
+git submodule update --init --recursive lib/N64ModernRuntime lib/rt64
+
 N64MR_REPO="https://github.com/mstan/N64ModernRuntime.git"
 RT64_REPO="https://github.com/mstan/rt64.git"
 BRANCH="main"
